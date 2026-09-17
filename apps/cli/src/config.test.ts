@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { initializeProjectConfig, loadCadenceConfig, pipelineStages, qaStages, resolveChatCandidates } from "./config.ts";
+import { initializeProjectConfig, loadCadenceConfig, pipelineStages, qaStages, resolveChatCandidates, workflowStages } from "./config.ts";
 
 test("project configuration overrides defaults without replacing unrelated settings", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "cadence-config-"));
@@ -22,6 +22,11 @@ test("project configuration overrides defaults without replacing unrelated setti
     assert.deepEqual(qaStages(config).map((stage) => stage.name), [
       "Collect evidence", "Requirements", "Implementation", "Verification gaps", "Adversarial", "QA report", "Human decision",
     ]);
+    assert.equal(workflowStages(config, "refine").length, 4);
+    assert.equal(workflowStages(config, "release").length, 7);
+    assert.equal(workflowStages(config, "plan").length, 7);
+    assert.equal(workflowStages(config, "crossrepo").length, 7);
+    assert.equal(workflowStages(config, "handoff").length, 2);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

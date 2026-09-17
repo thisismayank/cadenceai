@@ -1,4 +1,4 @@
-import type { CadenceConfig, PipelineStageConfig } from "./config.ts";
+import { workflowPipeline, type CadenceConfig, type PipelineStageConfig, type ReadOnlyWorkflowKind } from "./config.ts";
 import type { RiskLevel, TaskEnvelope } from "./task.ts";
 
 export type BudgetMode = "economy" | "balanced" | "thorough";
@@ -21,6 +21,7 @@ export type ReviewExecutionPlan = {
 };
 
 export type QaExecutionPlan = ReviewExecutionPlan;
+export type WorkflowExecutionPlan = ReviewExecutionPlan;
 
 const STAGE_POLICY: Record<BudgetMode, Record<RiskLevel, string[] | "configured">> = {
   economy: {
@@ -136,6 +137,59 @@ export function formatQaPreflight(plan: QaExecutionPlan, targets: string[], maxM
     "",
     "QA is read-only. It retrieves ticket requirements, linked pull-request diffs, and CI/check evidence without changing files or external systems.",
     "Verification uses reported repository and pull-request evidence. Missing local execution evidence is reported as unverified, never guessed.",
+    "Press Enter to continue or type /cancel.",
+  ].join("\n");
+}
+
+export function planWorkflowExecution(config: CadenceConfig, kind: ReadOnlyWorkflowKind): WorkflowExecutionPlan {
+  const pipeline = workflowPipeline(config, kind);
+  const stageIds = pipeline.order.filter((id) => Boolean(pipeline.stages[id]));
+  const stages = stageIds.map((id) => pipeline.stages[id]!);
+  return {
+    stageIds,
+    stages,
+    modelCalls: stages.filter((stage) => stage.modelProfile !== "human" && stage.modelProfile !== "shell").length,
+  };
+}
+
+export function formatWorkflowPreflight(
+  kind: ReadOnlyWorkflowKind,
+  plan: WorkflowExecutionPlan,
+  target: string,
+  maxModelCalls: number | null = null,
+): string {
+  const metadata: Record<ReadOnlyWorkflowKind, { title: string; note: string }> = {
+    refine: {
+      title: "TICKET REFINEMENT",
+      note: "Produces a proposed ready-for-development brief. It does not edit the source ticket.",
+    },
+    release: {
+      title: "RELEASE READINESS",
+      note: "Produces a read-only go/no-go assessment. Missing scope or verification evidence remains explicit.",
+    },
+    plan: {
+      title: "CHALLENGED PLANNING",
+      note: "Product, UX, engineering, commercial, and adversarial perspectives challenge one another before synthesis.",
+    },
+    crossrepo: {
+      title: "CROSS-REPOSITORY PLAN",
+      note: "Discovery is read-only. No repository will be modified, checked out, installed, built, or committed.",
+    },
+    handoff: {
+      title: "SESSION HANDOFF",
+      note: "Creates a local Markdown continuation brief under .cadence/handoffs without changing project files.",
+    },
+  };
+  const details = metadata[kind];
+  return [
+    `THOROUGH · ${details.title}`,
+    "",
+    `Target: ${target}`,
+    `Expected model calls: ${plan.modelCalls}`,
+    `Per-task limit: ${maxModelCalls ?? "off"}`,
+    `Cadence: ${plan.stages.map((stage) => stage.name).join(" → ")}`,
+    "",
+    details.note,
     "Press Enter to continue or type /cancel.",
   ].join("\n");
 }

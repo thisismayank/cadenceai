@@ -7,6 +7,7 @@ import {
   connectedCandidateOrder,
   connectedToolAllowlist,
   extractGitHubPullRequestUrls,
+  extractLinearTicketIds,
   rememberConnectedCandidate,
 } from "./context.ts";
 import { createTaskEnvelope } from "./task.ts";
@@ -59,4 +60,25 @@ test("canonical pull-request URLs are extracted and deduplicated from connected 
     "https://github.com/acme/app/pull/42",
     "https://github.com/acme/api/pull/9",
   ]);
+});
+
+test("ticket identifiers discovered during release collection are retained as sources", () => {
+  assert.deepEqual(extractLinearTicketIds("Release includes ELM-12, ELM-13, and ELM-12 again."), ["ELM-12", "ELM-13"]);
+});
+
+test("release and cross-repository collection use scoped read-only commands", () => {
+  const release = createTaskEnvelope("Assess release readiness for ENG-123", DEFAULT_CONFIG);
+  const releaseTools = connectedToolAllowlist(release);
+  assert.equal(release.intent, "release");
+  assert.equal(releaseTools.includes("mcp__linear__list_issues"), true);
+  assert.equal(releaseTools.includes("Bash(gh pr checks *)"), true);
+  assert.match(buildConnectedPrompt(release), /release-readiness evidence collection/i);
+  assert.match(buildConnectedPrompt(createTaskEnvelope("Run a release readiness assessment for the September milestone", DEFAULT_CONFIG)), /enumerate its concrete ticket and pull-request scope/i);
+
+  const crossrepo = createTaskEnvelope("Plan a cross-repo API migration", DEFAULT_CONFIG);
+  const crossrepoTools = connectedToolAllowlist(crossrepo);
+  assert.equal(crossrepo.intent, "crossrepo");
+  assert.equal(crossrepoTools.includes("Bash(git -C * status *)"), true);
+  assert.equal(crossrepoTools.some((tool) => /reset|checkout|commit|push/.test(tool)), false);
+  assert.match(buildConnectedPrompt(crossrepo), /Do not modify, checkout, fetch, install, build, or run/i);
 });

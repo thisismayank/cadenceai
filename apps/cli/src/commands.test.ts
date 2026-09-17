@@ -7,6 +7,11 @@ test("quickstart covers chat, low-cost engineering, and Git review", () => {
   assert.match(QUICKSTART, /budget economy/i);
   assert.match(QUICKSTART, /git diff/i);
   assert.match(QUICKSTART, /does not commit/i);
+  assert.match(QUICKSTART, /\/refine/);
+  assert.match(QUICKSTART, /\/release/);
+  assert.match(QUICKSTART, /\/plan/);
+  assert.match(QUICKSTART, /\/crossrepo/);
+  assert.match(QUICKSTART, /\/handoff/);
 });
 
 test("command help and update guidance expose self-service entry points", () => {

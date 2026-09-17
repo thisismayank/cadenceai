@@ -62,6 +62,18 @@ To assess an implemented Linear ticket without changing anything:
 
 The preflight shows six expected model calls. CadenceAI retrieves the ticket, comments, linked pull requests, diffs, and reported CI checks, then maps implementation evidence to each requirement. It does not execute untrusted PR code locally; missing test-execution evidence is reported as unverified.
 
+Other read-only workflows are available when you need them:
+
+~~~
+/refine ELM-2851
+/release ELM-2851 ELM-2852 and their linked PRs
+/plan Improve developer onboarding without requiring API keys
+/crossrepo Migrate the API contract across ./service and ./client
+/handoff
+~~~
+
+Refinement uses three planned calls and handoff uses one. Release, planning, and cross-repository assessment use six by default. Handoffs are saved under `.cadence/handoffs/`. Cross-repository mode creates a coordinated plan but does not modify any repository.
+
 ## 4. Try an Economy engineering task
 
 ~~~

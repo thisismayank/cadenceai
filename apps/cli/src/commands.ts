@@ -27,6 +27,13 @@ export const QUICKSTART = [
   "   git status --short",
   "   git diff",
   "",
+  "Optional read-only workflows",
+  "   /refine ELM-2851",
+  "   /release ELM-2851 and its linked PRs",
+  "   /plan Improve developer onboarding",
+  "   /crossrepo Coordinate ./service and ./client",
+  "   /handoff",
+  "",
   "CadenceAI does not commit, push, revert, or delete your work automatically.",
   "Use /usage for local call history, /retry after a provider failure, and /doctor for remediation.",
 ].join("\n");

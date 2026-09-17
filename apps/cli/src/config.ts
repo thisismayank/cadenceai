@@ -48,6 +48,11 @@ export type CadenceConfig = {
     engineering: EngineeringPipelineConfig;
     pullRequestReview: ReviewPipelineConfig;
     qualityAssurance: ReviewPipelineConfig;
+    ticketRefinement: ReviewPipelineConfig;
+    releaseReadiness: ReviewPipelineConfig;
+    planning: ReviewPipelineConfig;
+    crossRepository: ReviewPipelineConfig;
+    handoff: ReviewPipelineConfig;
   };
 };
 
@@ -117,6 +122,58 @@ export const DEFAULT_CONFIG: CadenceConfig = {
       },
       order: ["collect", "requirements", "implementation", "verification", "adversarial", "synthesize", "human_review"],
     },
+    ticketRefinement: {
+      stages: {
+        collect: { name: "Collect ticket", detail: "Retrieve the ticket, comments, dependencies, and relevant repository context", modelProfile: "connected_research" },
+        critique: { name: "Requirements critic", detail: "Find ambiguity, missing behavior, edge cases, and unverifiable acceptance criteria", modelProfile: "balanced_reasoner" },
+        synthesize: { name: "Ready-for-development brief", detail: "Rewrite the requirement into an actionable, testable engineering brief", modelProfile: "pull_request_review" },
+        human_review: { name: "Human decision", detail: "Approve the refined brief or resolve its open questions", modelProfile: "human" },
+      },
+      order: ["collect", "critique", "synthesize", "human_review"],
+    },
+    releaseReadiness: {
+      stages: {
+        collect: { name: "Collect release evidence", detail: "Retrieve scoped tickets, pull requests, checks, and repository evidence", modelProfile: "connected_research" },
+        scope: { name: "Release scope", detail: "Establish intended scope, dependencies, exclusions, and acceptance boundaries", modelProfile: "balanced_reasoner" },
+        coverage: { name: "Implementation coverage", detail: "Map merged and pending changes to the release scope", modelProfile: "pull_request_review" },
+        operations: { name: "Operational readiness", detail: "Assess migrations, rollout, monitoring, rollback, flags, and documentation", modelProfile: "flagship_reasoner" },
+        adversarial: { name: "Release challenge", detail: "Try to falsify readiness and identify plausible blockers", modelProfile: "flagship_reasoner" },
+        synthesize: { name: "Go/no-go report", detail: "Produce a release decision with blockers, conditions, and owners", modelProfile: "pull_request_review" },
+        human_review: { name: "Release decision", detail: "Make the final go, conditional-go, or no-go decision", modelProfile: "human" },
+      },
+      order: ["collect", "scope", "coverage", "operations", "adversarial", "synthesize", "human_review"],
+    },
+    planning: {
+      stages: {
+        frame: { name: "Product framing", detail: "Define the problem, users, outcomes, constraints, and evidence", modelProfile: "connected_research" },
+        experience: { name: "UX challenge", detail: "Challenge flows, usability, accessibility, and user assumptions", modelProfile: "balanced_reasoner" },
+        engineering: { name: "Engineering challenge", detail: "Challenge feasibility, architecture, sequencing, and operational risk", modelProfile: "flagship_reasoner" },
+        commercial: { name: "Commercial challenge", detail: "Challenge adoption, positioning, support, and success measures", modelProfile: "balanced_reasoner" },
+        adversarial: { name: "Adversarial council", detail: "Attack the plan's assumptions, contradictions, and failure modes", modelProfile: "flagship_reasoner" },
+        synthesize: { name: "Decision-ready plan", detail: "Resolve disagreements into a phased plan with decisions and open questions", modelProfile: "flagship_reasoner" },
+        human_review: { name: "Human decision", detail: "Approve, revise, or reject the plan", modelProfile: "human" },
+      },
+      order: ["frame", "experience", "engineering", "commercial", "adversarial", "synthesize", "human_review"],
+    },
+    crossRepository: {
+      stages: {
+        collect: { name: "Discover repositories", detail: "Inspect named repositories, contracts, ownership, and current state read-only", modelProfile: "connected_research" },
+        contracts: { name: "Contract analysis", detail: "Identify public interfaces, schemas, compatibility requirements, and invariants", modelProfile: "balanced_reasoner" },
+        dependencies: { name: "Dependency map", detail: "Trace producers, consumers, ordering constraints, and test boundaries", modelProfile: "pull_request_review" },
+        delivery: { name: "Delivery design", detail: "Design a repository-by-repository implementation, validation, and rollout sequence", modelProfile: "flagship_reasoner" },
+        adversarial: { name: "Integration challenge", detail: "Probe version skew, partial rollout, rollback, and integration failure modes", modelProfile: "flagship_reasoner" },
+        synthesize: { name: "Coordinated change plan", detail: "Produce an executable cross-repository plan with gates and ownership", modelProfile: "flagship_reasoner" },
+        human_review: { name: "Human authorization", detail: "Review the plan before any repository is modified", modelProfile: "human" },
+      },
+      order: ["collect", "contracts", "dependencies", "delivery", "adversarial", "synthesize", "human_review"],
+    },
+    handoff: {
+      stages: {
+        synthesize: { name: "Create handoff", detail: "Turn the session into a durable, evidence-aware continuation brief", modelProfile: "balanced_reasoner" },
+        human_review: { name: "Human review", detail: "Confirm the handoff before sharing it", modelProfile: "human" },
+      },
+      order: ["synthesize", "human_review"],
+    },
   },
 };
 
@@ -184,6 +241,25 @@ export function qaStages(config: CadenceConfig): PipelineStageConfig[] {
   });
 }
 
+export type ReadOnlyWorkflowKind = "refine" | "release" | "plan" | "crossrepo" | "handoff";
+
+export function workflowPipeline(config: CadenceConfig, kind: ReadOnlyWorkflowKind): ReviewPipelineConfig {
+  if (kind === "refine") return config.pipelines.ticketRefinement;
+  if (kind === "release") return config.pipelines.releaseReadiness;
+  if (kind === "plan") return config.pipelines.planning;
+  if (kind === "crossrepo") return config.pipelines.crossRepository;
+  return config.pipelines.handoff;
+}
+
+export function workflowStages(config: CadenceConfig, kind: ReadOnlyWorkflowKind): PipelineStageConfig[] {
+  const pipeline = workflowPipeline(config, kind);
+  return pipeline.order.map((id) => {
+    const stage = pipeline.stages[id];
+    if (!stage) throw new Error(`${kind} workflow references unknown stage '${id}'`);
+    return stage;
+  });
+}
+
 async function readOptionalJson(path: string): Promise<unknown | undefined> {
   try {
     return JSON.parse(await readFile(path, "utf8")) as unknown;
@@ -234,6 +310,16 @@ function validateConfig(value: unknown): CadenceConfig {
   if (!Array.isArray(config.pipelines?.qualityAssurance?.order)) {
     throw new Error("CadenceAI config is missing the quality-assurance order");
   }
+  for (const [name, pipeline] of Object.entries({
+    ticketRefinement: config.pipelines?.ticketRefinement,
+    releaseReadiness: config.pipelines?.releaseReadiness,
+    planning: config.pipelines?.planning,
+    crossRepository: config.pipelines?.crossRepository,
+    handoff: config.pipelines?.handoff,
+  })) {
+    if (!Array.isArray(pipeline?.order)) throw new Error(`CadenceAI config is missing the ${name} order`);
+    for (const [id, stage] of Object.entries(pipeline.stages)) validateStage(stage, `${name}.stages.${id}`);
+  }
   for (const [id, stage] of Object.entries(config.pipelines.engineering.stages)) validateStage(stage, `engineering.stages.${id}`);
   for (const [id, stage] of Object.entries(config.pipelines.pullRequestReview.stages)) validateStage(stage, `pullRequestReview.stages.${id}`);
   for (const [id, stage] of Object.entries(config.pipelines.qualityAssurance.stages)) validateStage(stage, `qualityAssurance.stages.${id}`);
@@ -242,6 +328,7 @@ function validateConfig(value: unknown): CadenceConfig {
   pipelineStages(config, "high");
   reviewStages(config);
   qaStages(config);
+  for (const kind of ["refine", "release", "plan", "crossrepo", "handoff"] as const) workflowStages(config, kind);
   const verification = config.pipelines.engineering.verificationCommands;
   if (verification !== "auto" && (!Array.isArray(verification) || verification.some((command) => !isObject(command) || typeof command.command !== "string" || !Array.isArray(command.args) || typeof command.label !== "string"))) {
     throw new Error("engineering.verificationCommands must be 'auto' or an array of command definitions");

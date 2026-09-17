@@ -96,8 +96,9 @@ Inside the TUI:
 - Describe a clear implementation task (for example, `implement ENG-123`) to resolve connected context and activate a risk-sized test-first pipeline.
 - Ask it to review a pull request to run an independent, read-only review cadence over the real diff.
 - Ask it to assess or QA a Linear ticket to retrieve requirements and comments, discover linked pull requests, inspect diffs and CI checks, and produce a release-oriented coverage report.
+- Refine a ticket before development, challenge a product plan, assess a release, coordinate a cross-repository change plan, or save a durable session handoff.
 - Use `/chat <question>` or `/pipeline <task>` to override automatic routing once.
-- Use `/explore <request>` to force connected, read-only exploration, `/review <PR>` to force the review pipeline, or `/qa <ticket>` to force ticket QA.
+- Use `/explore <request>` to force connected exploration, `/review <PR>` for PR review, `/qa <ticket>` for implementation QA, `/refine <ticket>` for requirement readiness, `/release <scope>` for go/no-go assessment, `/plan <proposal>` for challenged planning, `/crossrepo <change>` for multi-repository coordination, or `/handoff [focus]` to save a continuation brief.
 - Use `/mode auto`, `/mode chat`, or `/mode pipeline` to control routing for subsequent messages.
 - Use `/models` and `/model <alias>` to select the model used for ordinary conversation. Direct OpenCode references use `/model opencode/<provider>/<model>`.
 - Use `/budget economy`, `/budget balanced`, or `/budget thorough` to control engineering depth. Balanced is the default.
@@ -109,7 +110,7 @@ Inside the TUI:
 - Type `/retry` after a provider failure to retry the preserved request and frozen context, or `/quickstart` for the guided first task.
 - Press `Ctrl+L` to focus the cadence sidebar, use the arrow keys to select a stage, and press Enter to expand its details and streamed events.
 - Type `/stages` to focus the same navigator, `/new` to clear the active cadence, or `/exit` to close the session.
-- Type `/cancel` to stop an engineering or pull-request-review preflight before any model is invoked.
+- Type `/cancel` to stop any pending workflow preflight before a model is invoked.
 
 After linking the package globally, launch it from any project with either `cadenceai` or `cadence`.
 
@@ -126,6 +127,11 @@ CadenceAI separates the requested outcome from its context:
 | Engineering | Optional connected-context resolution followed by risk-adaptive investigation, test design, implementation, deterministic verification, adversarial review, and human review |
 | Pull-request review | Read-only evidence collection followed by requirements, correctness, test-gap, adversarial, and synthesis stages |
 | Ticket QA | Read-only Linear and linked-PR evidence collection followed by requirement mapping, implementation coverage, verification-gap, adversarial, and report stages |
+| Ticket refinement | Three-call pre-development critique and ready-for-development brief; the ticket is never edited automatically |
+| Release readiness | Six-call scope, coverage, operational, adversarial, and go/no-go assessment over tickets and PRs |
+| Challenged planning | Six perspectives spanning product, UX, engineering, commercial concerns, adversarial review, and synthesis |
+| Cross-repository planning | Read-only contract, dependency, sequencing, integration-risk, and coordinated-change analysis |
+| Session handoff | One-call synthesis saved locally as Markdown under `.cadence/handoffs/` |
 
 Engineering tasks are classified as low, medium, or high risk. Low-risk work uses a shorter cadence; security, authentication, billing, permissions, migrations, and other configured high-risk areas receive the full adversarial cadence.
 
@@ -137,11 +143,13 @@ Pull-request review is read-only and always uses its configured thorough cadence
 
 Ticket QA is also read-only and uses six model calls in the default configuration: one connected evidence pass and five independent assessment stages. For example, `/qa ELM-2851` fetches the ticket and comments, discovers linked GitHub pull requests, inspects their diffs and reported CI checks, and returns a requirement-coverage matrix with a Pass, Conditional Pass, Fail, or Insufficient Evidence verdict. It does not silently check out or execute untrusted PR code locally; absent execution evidence is labeled unverified. Confirmed findings can be carried into a later engineering request only after its normal clean-Git preflight.
 
+The additional decision workflows use the same explicit preflight and model-call ceiling. Ticket refinement uses three calls and handoff uses one; release readiness, challenged planning, and cross-repository planning use six calls each by default. They are read-only with respect to project repositories and external systems; handoff creates one local session artifact under `.cadence/`. Cross-repository mode requires repository paths to be accessible from the directory where CadenceAI was launched—launch it from a shared parent when coordinating sibling repositories—and produces an authorization-ready plan rather than mutating multiple worktrees.
+
 When an engineering request refers to prior discussion, CadenceAI captures up to eight recent substantive turns within a bounded local context capsule. Interface messages and previous preflights are excluded, `/new` forms a hard context boundary, and explicit ticket or risk signals in the capsule influence connected-context resolution and risk selection. The frozen capsule is shown before execution and prior assistant statements are labeled as untrusted proposals that agents must verify.
 
 Quota-like provider errors activate a temporary in-process cooldown, allowing the router to fall back without repeatedly retrying an exhausted provider. Successful calls are recorded locally in `.cadence/usage.jsonl`.
 
-Failed chat, exploration, engineering, review, and ticket-QA requests remain retryable within the session. CadenceAI explains active cooldowns and directs the user toward another chat model, Economy mode, waiting for reset, or runtime remediation. It cannot read an authoritative Claude or Codex subscription balance.
+Failed chat, exploration, engineering, review, QA, refinement, release, planning, cross-repository, and handoff requests remain retryable within the session. CadenceAI explains active cooldowns and directs the user toward another chat model, Economy mode, waiting for reset, or runtime remediation. It cannot read an authoritative Claude or Codex subscription balance.
 
 Routing itself is local and does not spend a model call. CadenceAI shows the selected path immediately (for example, `Connected → claude/sonnet → Linear ENG-123`), streams direct-chat output, caches CLI authentication checks briefly, and remembers the last successful connected runner per capability. Direct conversations resume provider sessions when Claude, Codex, or OpenCode exposes a session identifier; connected read-only lookups remain isolated one-shot sessions.
 
@@ -156,7 +164,7 @@ Run `/config init` inside the TUI to create a shareable `.cadenceai.json` in the
 - keywords used by the risk classifier;
 - stages selected for low-, medium-, and high-risk engineering tasks;
 - automatic or explicit deterministic verification commands;
-- pull-request review stages and their model profiles.
+- pull-request review, ticket QA, refinement, release, planning, cross-repository, and handoff stages and their model profiles.
 
 Run `/config reload` after editing. A personal override can also live at `~/.config/cadenceai/config.json`; project settings take precedence. Configuration is validated before it is activated. Credentials remain in Claude, Codex, OpenCode, and their MCP/provider configuration rather than in `.cadenceai.json`.
 

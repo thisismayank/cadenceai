@@ -9,10 +9,12 @@ import {
   formatExecutionPreflight,
   formatQaPreflight,
   formatReviewPreflight,
+  formatWorkflowPreflight,
   modelCallLimitViolation,
   planEngineeringExecution,
   planQaExecution,
   planReviewExecution,
+  planWorkflowExecution,
   type BudgetMode,
 } from "./budget.ts";
 import { answerQuestion } from "./chat.ts";
@@ -24,8 +26,10 @@ import {
   resolveChatCandidates,
   qaStages,
   reviewStages,
+  workflowStages,
   type CadenceConfig,
   type PipelineStageConfig,
+  type ReadOnlyWorkflowKind,
 } from "./config.ts";
 import { connectedCandidateOrder, contextForPipeline, resolveConnectedContext } from "./context.ts";
 import {
@@ -37,6 +41,7 @@ import {
 import { runEngineeringPipeline } from "./engineering.ts";
 import { diagnoseRuntimes, formatActionableDiagnostics } from "./doctor.ts";
 import { formatGitChanges, formatGitSafetyBlock, inspectGitWorktree } from "./git-safety.ts";
+import { handoffSessionContext, saveHandoff } from "./handoff.ts";
 import { type InteractionMode } from "./intent.ts";
 import { qualityAssureTicket } from "./qa.ts";
 import { reviewPullRequest } from "./review.ts";
@@ -44,6 +49,7 @@ import { formatFailureRecovery } from "./recovery.ts";
 import { SessionStore, eventNow, type SessionEvent, type StageStatus } from "./session.ts";
 import { createTaskEnvelope, type RiskLevel, type TaskEnvelope, type TaskIntent } from "./task.ts";
 import { readUsageSummary } from "./usage.ts";
+import { runReadOnlyWorkflow, workflowLabel } from "./workflow.ts";
 
 type ChatMessage = { role: "you" | "cadence"; text: string };
 type RetryRequest =
@@ -51,7 +57,8 @@ type RetryRequest =
   | { kind: "explore"; envelope: TaskEnvelope }
   | { kind: "engineering"; envelope: TaskEnvelope; mode: BudgetMode; context: ConversationContextSnapshot | null }
   | { kind: "review"; envelope: TaskEnvelope }
-  | { kind: "qa"; envelope: TaskEnvelope };
+  | { kind: "qa"; envelope: TaskEnvelope }
+  | { kind: "workflow"; workflow: ReadOnlyWorkflowKind; envelope: TaskEnvelope; seedContext?: string };
 type StageView = {
   name: string;
   status: StageStatus;
@@ -96,7 +103,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   const [configPaths, setConfigPaths] = useState<string[]>([]);
   const [activeRisk, setActiveRisk] = useState<RiskLevel | null>(null);
   const [activeContext, setActiveContext] = useState("none");
-  const [activePipelineKind, setActivePipelineKind] = useState<"engineering" | "review" | "qa">("engineering");
+  const [activePipelineKind, setActivePipelineKind] = useState<Exclude<TaskIntent, "chat" | "explore">>("engineering");
   const [activePath, setActivePath] = useState("Chat → auto-select");
   const [draftResponse, setDraftResponse] = useState("");
   const [budgetMode, setBudgetMode] = useState<BudgetMode>(DEFAULT_CONFIG.budget.defaultMode);
@@ -107,6 +114,11 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   } | null>(null);
   const [pendingReview, setPendingReview] = useState<TaskEnvelope | null>(null);
   const [pendingQa, setPendingQa] = useState<TaskEnvelope | null>(null);
+  const [pendingWorkflow, setPendingWorkflow] = useState<{
+    kind: ReadOnlyWorkflowKind;
+    envelope: TaskEnvelope;
+    seedContext?: string;
+  } | null>(null);
   const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
 
   useEffect(() => {
@@ -569,6 +581,88 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     await addMessage({ role: "cadence", text: formatQaPreflight(plan, envelope.linearTickets, config.guardrails.maxModelCallsPerTask) });
   };
 
+  const runWorkflow = async (
+    kind: ReadOnlyWorkflowKind,
+    envelope: TaskEnvelope,
+    seedContext?: string,
+  ) => {
+    const plan = planWorkflowExecution(config, kind);
+    const limitError = modelCallLimitViolation(plan.modelCalls, config.guardrails.maxModelCallsPerTask);
+    if (limitError) {
+      setPendingWorkflow(null);
+      setRetryRequest({ kind: "workflow", workflow: kind, envelope, seedContext });
+      setNotice(`${workflowLabel(kind)} blocked · per-task call limit changed after preflight`);
+      setActivePath(`${workflowLabel(kind)} → blocked by call limit`);
+      await addMessage({ role: "cadence", text: limitError });
+      return;
+    }
+    setPendingWorkflow(null);
+    setBusy(true);
+    setLastRoute(kind);
+    setActivePipelineKind(kind);
+    setActiveRisk(null);
+    setActiveContext(workflowTarget(envelope, kind));
+    setStages(stageViews(workflowStages(config, kind)));
+    setActivePath(`${workflowLabel(kind)} → executing read-only cadence`);
+    setNotice(`${workflowLabel(kind)} · working…`);
+    try {
+      const result = await runReadOnlyWorkflow(kind, envelope, cwd, config, (update) => {
+        void changeStage(update.stage.name, update.status, update.detail, update.model);
+      }, { seedContext });
+      if (result.context) setActiveContext(result.context.sources.map((source) => source.reference).join(", "));
+      const latest = result.runs.at(-1);
+      if (latest) setActiveModel(`${latest.cli} · ${latest.model}`);
+      let artifact = "";
+      if (kind === "handoff") {
+        const path = await saveHandoff(cwd, result.report);
+        artifact = `\n\nSaved locally to ${path}.`;
+      }
+      await addMessage({ role: "cadence", text: `${result.report}${artifact}\n\n${workflowCompletionNote(kind)}` });
+      setRetryRequest(null);
+      setActivePath(`${workflowLabel(kind)} → human decision`);
+      setNotice(`${workflowLabel(kind)} ready · ${result.runs.length} model stage${result.runs.length === 1 ? "" : "s"} · awaiting human review`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await storeRef.current?.append(eventNow({ type: "error", message }));
+      setRetryRequest({ kind: "workflow", workflow: kind, envelope, seedContext });
+      await addMessage({ role: "cadence", text: `I could not complete ${workflowLabel(kind)}. ${message}\n${formatFailureRecovery(message, getProviderCooldowns())}` });
+      setNotice(`${workflowLabel(kind)} failed · use /doctor to inspect runtimes and connections`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const prepareWorkflow = async (
+    kind: ReadOnlyWorkflowKind,
+    envelope: TaskEnvelope,
+    seedContext?: string,
+  ) => {
+    const plan = planWorkflowExecution(config, kind);
+    const limitError = modelCallLimitViolation(plan.modelCalls, config.guardrails.maxModelCallsPerTask);
+    if (limitError) {
+      setPendingWorkflow(null);
+      setRetryRequest({ kind: "workflow", workflow: kind, envelope, seedContext });
+      setLastRoute(kind);
+      setActivePipelineKind(kind);
+      setActivePath(`${workflowLabel(kind)} → blocked by call limit`);
+      setNotice(`${workflowLabel(kind)} blocked · per-task call limit`);
+      await addMessage({ role: "cadence", text: limitError });
+      return;
+    }
+    setPendingWorkflow({ kind, envelope, seedContext });
+    setLastRoute(kind);
+    setActivePipelineKind(kind);
+    setActiveRisk(null);
+    setActiveContext(workflowTarget(envelope, kind));
+    setStages(stageViews(plan.stages));
+    setActivePath(`${workflowLabel(kind)} preflight → ${plan.modelCalls} calls`);
+    setNotice(`${workflowLabel(kind)} preflight ready · press Enter to continue · /cancel to stop`);
+    await addMessage({
+      role: "cadence",
+      text: formatWorkflowPreflight(kind, plan, workflowTarget(envelope, kind), config.guardrails.maxModelCallsPerTask),
+    });
+  };
+
   const submit = async (value: string) => {
     const text = value.trim();
     setInput("");
@@ -590,6 +684,12 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       await runQa(pending);
       return;
     }
+    if (!text && pendingWorkflow && !busy) {
+      const pending = pendingWorkflow;
+      setPendingWorkflow(null);
+      await runWorkflow(pending.kind, pending.envelope, pending.seedContext);
+      return;
+    }
     if (!text) return;
     if (text === "/exit" || text === "/quit") {
       exit();
@@ -604,6 +704,11 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         "/pipeline <task>     force the engineering cadence",
         "/review <PR>         run the pull-request review pipeline",
         "/qa <ticket>         assess requirements, linked PRs, and CI evidence",
+        "/refine <ticket>     make requirements development-ready",
+        "/release <scope>     produce a release go/no-go assessment",
+        "/plan <proposal>     challenge a plan across product, UX, engineering, and commercial roles",
+        "/crossrepo <change>  design a coordinated multi-repository change read-only",
+        "/handoff [focus]     save a durable continuation brief",
         "/pipelines           show risk-adaptive stage layouts",
         "/budget <mode>       economy, balanced, or thorough",
         "/limit <n|off>       set the session model-call ceiling",
@@ -656,7 +761,8 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       else if (retry.kind === "explore") await runExplore(retry.envelope);
       else if (retry.kind === "engineering") await prepareEngineering(retry.envelope, retry.mode, retry.context);
       else if (retry.kind === "review") await prepareReview(retry.envelope);
-      else await prepareQa(retry.envelope);
+      else if (retry.kind === "qa") await prepareQa(retry.envelope);
+      else await prepareWorkflow(retry.workflow, retry.envelope, retry.seedContext);
       return;
     }
     if (text === "/usage") {
@@ -694,6 +800,12 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
           text: "The pending ticket QA is unchanged: QA always uses the configured evidence-driven cadence.",
         });
       }
+      if (pendingWorkflow) {
+        await addMessage({
+          role: "cadence",
+          text: `The pending ${workflowLabel(pendingWorkflow.kind)} is unchanged: engineering budget modes do not weaken this workflow.`,
+        });
+      }
       return;
     }
     if (text === "/limit" || text.startsWith("/limit ")) {
@@ -707,11 +819,12 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         await addMessage({ role: "cadence", text: "The model-call limit must be an integer from 1 to 50, or off." });
         return;
       }
-      const replacedPreflight = Boolean(pendingEngineering || pendingReview || pendingQa);
+      const replacedPreflight = Boolean(pendingEngineering || pendingReview || pendingQa || pendingWorkflow);
       setConfig((current) => ({ ...current, guardrails: { maxModelCallsPerTask: parsed } }));
       setPendingEngineering(null);
       setPendingReview(null);
       setPendingQa(null);
+      setPendingWorkflow(null);
       setNotice(`Per-task model-call limit: ${parsed ?? "off"}`);
       await addMessage({
         role: "cadence",
@@ -742,10 +855,11 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       await addMessage({ role: "cadence", text: "Usage: /context view or /context none" });
       return;
     }
-    if (text === "/cancel" && (pendingEngineering || pendingReview || pendingQa)) {
+    if (text === "/cancel" && (pendingEngineering || pendingReview || pendingQa || pendingWorkflow)) {
       setPendingEngineering(null);
       setPendingReview(null);
       setPendingQa(null);
+      setPendingWorkflow(null);
       setRetryRequest(null);
       setStages(initialStages.map((stage) => ({ ...stage, logs: [], expanded: false })));
       setLastRoute("chat");
@@ -772,6 +886,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       setPendingEngineering(null);
       setPendingReview(null);
       setPendingQa(null);
+      setPendingWorkflow(null);
       setRetryRequest(null);
       await addMessage({ role: "cadence", text: "Ready for a new question or task." });
       setNotice(`Mode: ${mode}`);
@@ -853,7 +968,10 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
           return `${risk}: ${planEngineeringExecution(envelope, config, budgetMode).stages.map((stage) => stage.name).join(" → ")}`;
         })
         .join("\n");
-      await addMessage({ role: "cadence", text: `Engineering pipeline · ${budgetMode}\n${risks}\n\nPull-request review\n${reviewStages(config).map((stage) => stage.name).join(" → ")}\n\nTicket QA\n${qaStages(config).map((stage) => stage.name).join(" → ")}` });
+      const workflows = (["refine", "release", "plan", "crossrepo", "handoff"] as const)
+        .map((kind) => `${workflowLabel(kind)}\n${workflowStages(config, kind).map((stage) => stage.name).join(" → ")}`)
+        .join("\n\n");
+      await addMessage({ role: "cadence", text: `Engineering pipeline · ${budgetMode}\n${risks}\n\nPull-request review\n${reviewStages(config).map((stage) => stage.name).join(" → ")}\n\nTicket QA\n${qaStages(config).map((stage) => stage.name).join(" → ")}\n\n${workflows}` });
       return;
     }
     if (text.startsWith("/mode")) {
@@ -877,6 +995,16 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
             ? "review"
             : text === "/qa" || text.startsWith("/qa ")
               ? "qa"
+              : text === "/refine" || text.startsWith("/refine ")
+                ? "refine"
+                : text === "/release" || text.startsWith("/release ")
+                  ? "release"
+                  : text === "/plan" || text.startsWith("/plan ")
+                    ? "plan"
+                    : text === "/crossrepo" || text.startsWith("/crossrepo ")
+                      ? "crossrepo"
+                      : text === "/handoff" || text.startsWith("/handoff ")
+                        ? "handoff"
             : null;
     if (forced && !text.includes(" ")) {
       if (forced === "chat" || forced === "engineering") {
@@ -884,16 +1012,29 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         setMode(nextMode);
         setNotice(`Mode set to ${nextMode}`);
         await addMessage({ role: "cadence", text: `Mode is now ${nextMode}. ${modeDescription(nextMode)}` });
+        return;
+      } else if (forced === "handoff") {
+        // A bare handoff intentionally summarizes the current session.
       } else {
-        await addMessage({ role: "cadence", text: `Usage: /${forced === "review" ? "review <PR or diff request>" : forced === "qa" ? "qa <Linear ticket>" : "explore <connected question>"}` });
+        const usage = forced === "review" ? "review <PR or diff request>"
+          : forced === "qa" ? "qa <Linear ticket>"
+          : forced === "refine" ? "refine <ticket or requirements>"
+          : forced === "release" ? "release <tickets, PRs, or milestone>"
+          : forced === "plan" ? "plan <proposal>"
+          : forced === "crossrepo" ? "crossrepo <change and repository paths>"
+          : "explore <connected question>";
+        await addMessage({ role: "cadence", text: `Usage: /${usage}` });
+        return;
       }
-      return;
     }
-    const request = forced ? text.slice(text.indexOf(" ") + 1).trim() : text;
-    const replacedPreflight = pendingEngineering ?? pendingReview ?? pendingQa;
+    const request = forced === "handoff" && !text.includes(" ")
+      ? "Create a handoff for the current session"
+      : forced ? text.slice(text.indexOf(" ") + 1).trim() : text;
+    const replacedPreflight = pendingEngineering ?? pendingReview ?? pendingQa ?? pendingWorkflow;
     if (pendingEngineering) setPendingEngineering(null);
     if (pendingReview) setPendingReview(null);
     if (pendingQa) setPendingQa(null);
+    if (pendingWorkflow) setPendingWorkflow(null);
     const userMessage: ChatMessage = { role: "you", text: request };
     const history = [...messages, userMessage];
     await addMessage(userMessage);
@@ -919,6 +1060,10 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       await prepareReview(envelope);
     } else if (envelope.intent === "qa") {
       await prepareQa(envelope);
+    } else if (["refine", "release", "plan", "crossrepo", "handoff"].includes(envelope.intent)) {
+      const kind = envelope.intent as ReadOnlyWorkflowKind;
+      const seedContext = kind === "handoff" || kind === "plan" ? handoffSessionContext(messages) : undefined;
+      await prepareWorkflow(kind, envelope, seedContext);
     } else {
       await runChat(request, history);
     }
@@ -927,7 +1072,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   const visibleMessages = useMemo(() => messages.slice(-(compact ? 5 : 8)), [compact, messages]);
   const showWelcome = messages.length === 1 && stages.every((stage) => stage.status === "waiting");
   const pipelineActive = stages.some((stage) => stage.status !== "waiting");
-  const showPipeline = (pipelineActive || Boolean(pendingEngineering) || Boolean(pendingReview) || Boolean(pendingQa)) && (lastRoute === "engineering" || lastRoute === "review" || lastRoute === "qa");
+  const showPipeline = (pipelineActive || Boolean(pendingEngineering) || Boolean(pendingReview) || Boolean(pendingQa) || Boolean(pendingWorkflow)) && lastRoute !== "chat" && lastRoute !== "explore";
 
   if (showWelcome) {
     return (
@@ -1017,7 +1162,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         >
           {showPipeline ? (
             <>
-          <Text bold>{lastRoute === "review" ? "REVIEW" : lastRoute === "qa" ? "TICKET QA" : "CADENCE"} <Text dimColor>({stages.filter((stage) => stage.status === "complete").length}/{stages.length}){activeRisk ? ` · ${activeRisk}` : ""}</Text></Text>
+          <Text bold>{pipelineTitle(lastRoute)} <Text dimColor>({stages.filter((stage) => stage.status === "complete").length}/{stages.length}){activeRisk ? ` · ${activeRisk}` : ""}</Text></Text>
           {stages.map((stage, index) => (
             <Box key={`${stage.name}-${index}`} flexDirection="column">
               <Text inverse={stageFocus && selectedStage === index}>
@@ -1071,6 +1216,8 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
                 ? "Press Enter to run the thorough review, or /cancel"
                 : pendingQa
                   ? "Press Enter to run read-only ticket QA, or /cancel"
+                  : pendingWorkflow
+                    ? `Press Enter to run ${workflowLabel(pendingWorkflow.kind)}, or /cancel`
                 : "Ask anything, or describe an implementation task"}
         />
       </Box>
@@ -1141,6 +1288,35 @@ function connectedTarget(envelope: TaskEnvelope): string {
     ...envelope.pullRequests.map((pullRequest) => `PR ${pullRequest}`),
   ];
   return targets.join(", ") || "repository";
+}
+
+function workflowTarget(envelope: TaskEnvelope, kind: ReadOnlyWorkflowKind): string {
+  const connected = connectedTarget(envelope);
+  if (connected !== "repository") return connected;
+  if (kind === "handoff") return "current session";
+  if (kind === "crossrepo") return "repositories named in request";
+  if (kind === "release") return "release scope in request";
+  if (kind === "plan") return "proposal in request";
+  return "requirements in request";
+}
+
+function workflowCompletionNote(kind: ReadOnlyWorkflowKind): string {
+  if (kind === "refine") return "No source ticket was edited. Apply the proposed brief only after human review.";
+  if (kind === "release") return "No release, ticket, pull request, or deployment state was changed.";
+  if (kind === "plan") return "This is a challenged recommendation, not an approved commitment. Human owners still decide.";
+  if (kind === "crossrepo") return "No repository was modified. Authorize implementation separately after reviewing repository boundaries and Git state.";
+  return "The handoff is local and may still contain proposals that the next person should verify.";
+}
+
+function pipelineTitle(intent: TaskIntent): string {
+  if (intent === "review") return "REVIEW";
+  if (intent === "qa") return "TICKET QA";
+  if (intent === "refine") return "REFINE";
+  if (intent === "release") return "RELEASE";
+  if (intent === "plan") return "PLAN";
+  if (intent === "crossrepo") return "CROSS-REPO";
+  if (intent === "handoff") return "HANDOFF";
+  return "CADENCE";
 }
 
 function budgetDescription(mode: BudgetMode): string {

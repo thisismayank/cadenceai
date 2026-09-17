@@ -52,3 +52,22 @@ test("conversation signals carry ticket and risk context into referential engine
   assert.deepEqual(envelope.linearTickets, ["ELM-2834"]);
   assert.equal(envelope.needsConnectedTools, true);
 });
+
+test("specialized workflow requests route locally without a classifier call", () => {
+  const cases = [
+    ["Refine ELM-10 so it is ready for development", "refine"],
+    ["Run a go/no-go release readiness assessment for ELM-10", "release"],
+    ["Plan a new onboarding experience", "plan"],
+    ["Design this change across multiple repositories", "crossrepo"],
+    ["Create a handoff for this session", "handoff"],
+  ] as const;
+  for (const [request, intent] of cases) {
+    assert.equal(createTaskEnvelope(request, DEFAULT_CONFIG).intent, intent, request);
+  }
+  assert.equal(createTaskEnvelope(cases[0][0], DEFAULT_CONFIG).needsConnectedTools, true);
+  assert.equal(createTaskEnvelope(cases[1][0], DEFAULT_CONFIG).needsConnectedTools, true);
+  assert.equal(createTaskEnvelope(cases[2][0], DEFAULT_CONFIG).needsConnectedTools, false);
+  assert.equal(createTaskEnvelope(cases[3][0], DEFAULT_CONFIG).needsConnectedTools, true);
+  assert.equal(createTaskEnvelope(cases[4][0], DEFAULT_CONFIG).needsConnectedTools, false);
+  assert.equal(createTaskEnvelope("Plan an architecture change in this repository", DEFAULT_CONFIG).needsConnectedTools, true);
+});
