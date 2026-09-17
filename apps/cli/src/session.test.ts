@@ -8,7 +8,9 @@ import { SessionStore, eventNow } from "./session.ts";
 test("sessions persist and resume as JSONL", async () => {
   const project = await mkdtemp(join(tmpdir(), "cadence-session-test-"));
   try {
+    assert.equal(await SessionStore.hasHistory(project), false);
     const created = await SessionStore.create(project);
+    assert.equal(await SessionStore.hasHistory(project), true);
     await created.append(eventNow({ type: "user_message", text: "fix retries" }));
     const resumed = await SessionStore.resumeLatest(project);
     assert.ok(resumed);

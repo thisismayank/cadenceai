@@ -31,6 +31,15 @@ export class SessionStore {
     return store;
   }
 
+  static async hasHistory(projectDirectory: string): Promise<boolean> {
+    const directory = join(projectDirectory, ".cadence", "sessions");
+    try {
+      return (await readdir(directory)).some((file) => file.endsWith(".jsonl"));
+    } catch {
+      return false;
+    }
+  }
+
   static async resumeLatest(projectDirectory: string): Promise<SessionStore | null> {
     const directory = join(projectDirectory, ".cadence", "sessions");
     try {

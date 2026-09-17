@@ -48,6 +48,7 @@ import { reviewPullRequest } from "./review.ts";
 import { formatFailureRecovery } from "./recovery.ts";
 import { SessionStore, eventNow, type SessionEvent, type StageStatus } from "./session.ts";
 import { createTaskEnvelope, type RiskLevel, type TaskEnvelope, type TaskIntent } from "./task.ts";
+import { commandSuggestions, completeCommand, FIRST_RUN_TOUR, formatTuiHelp, type CommandGuide } from "./tui-help.ts";
 import { readUsageSummary } from "./usage.ts";
 import { runReadOnlyWorkflow, workflowLabel } from "./workflow.ts";
 
@@ -120,6 +121,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     seedContext?: string;
   } | null>(null);
   const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
+  const suggestedCommands = useMemo(() => commandSuggestions(input), [input]);
 
   useEffect(() => {
     void (async () => {
@@ -132,6 +134,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error));
       }
+      const hadHistory = await SessionStore.hasHistory(cwd);
       const resumed = continueLatest ? await SessionStore.resumeLatest(cwd) : null;
       const store = resumed ?? await SessionStore.create(cwd);
       storeRef.current = store;
@@ -141,7 +144,14 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         restoreEvents(events, setMessages, setStages);
         setNotice(`Resumed ${store.sessionId.slice(-8)}`);
       } else {
-        setNotice("Ready · messages persist in .cadence/sessions");
+        if (!hadHistory) {
+          const tour = { role: "cadence" as const, text: FIRST_RUN_TOUR };
+          setMessages([tour]);
+          await store.append(eventNow({ type: "assistant_message", text: FIRST_RUN_TOUR }));
+          setNotice("First-run tour · no model calls used");
+        } else {
+          setNotice("Ready · messages persist in .cadence/sessions");
+        }
       }
     })();
   }, [continueLatest, cwd]);
@@ -149,6 +159,10 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   useInput((value, key) => {
     if (key.ctrl && value === "l") {
       setStageFocus((current) => !current);
+      return;
+    }
+    if (!stageFocus && key.tab && !busy && suggestedCommands[0]) {
+      setInput(completeCommand(suggestedCommands[0], input));
       return;
     }
     if (!stageFocus) return;
@@ -429,7 +443,10 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       setActiveModel(`${context.runner} · ${context.model}`);
       setActiveContext(context.sources.map((source) => source.reference).join(", "));
       setActivePath(`Connected → ${context.runner}/${context.model} → ${connectedTarget(envelope)}`);
-      await addMessage({ role: "cadence", text: context.content });
+      const nextStep = envelope.linearTickets.length
+        ? "\n\nNext: use /refine <ticket> before implementation, or /qa <ticket> when linked PRs are ready to verify."
+        : "\n\nNext: ask a follow-up, use /plan <proposal> to challenge a decision, or /pipeline <task> to make a change.";
+      await addMessage({ role: "cadence", text: `${context.content}${nextStep}` });
       setRetryRequest(null);
       setNotice(`Connected · ${context.runner}/${context.model} · ${context.sources.length} source${context.sources.length === 1 ? "" : "s"}`);
     } catch (error) {
@@ -695,37 +712,8 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       exit();
       return;
     }
-    if (text === "/help") {
-      await addMessage({ role: "cadence", text: [
-        "Commands",
-        "/model <alias>       select the normal-chat model",
-        "/models              list configured chat models",
-        "/explore <request>   use repository and MCP tools read-only",
-        "/pipeline <task>     force the engineering cadence",
-        "/review <PR>         run the pull-request review pipeline",
-        "/qa <ticket>         assess requirements, linked PRs, and CI evidence",
-        "/refine <ticket>     make requirements development-ready",
-        "/release <scope>     produce a release go/no-go assessment",
-        "/plan <proposal>     challenge a plan across product, UX, engineering, and commercial roles",
-        "/crossrepo <change>  design a coordinated multi-repository change read-only",
-        "/handoff [focus]     save a durable continuation brief",
-        "/pipelines           show risk-adaptive stage layouts",
-        "/budget <mode>       economy, balanced, or thorough",
-        "/limit <n|off>       set the session model-call ceiling",
-        "/usage               show local 7-day model activity",
-        "/retry               retry the last preserved failure",
-        "/quickstart          show the five-minute walkthrough",
-        "/setup               show guided-setup instructions",
-        "/update              show safe update instructions",
-        "/context view        inspect pending conversation context",
-        "/context none        remove pending conversation context",
-        "/cancel              cancel a pending preflight",
-        "/config init         create .cadenceai.json",
-        "/config reload       validate and reload configuration",
-        "/doctor              inspect authenticated runners",
-        "/new                 clear the active cadence",
-        "/exit                close CadenceAI",
-      ].join("\n") });
+    if (text === "/help" || text.startsWith("/help ")) {
+      await addMessage({ role: "cadence", text: formatTuiHelp(text.slice("/help".length)) });
       return;
     }
     if (text === "/doctor") {
@@ -735,6 +723,10 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     }
     if (text === "/quickstart") {
       await addMessage({ role: "cadence", text: QUICKSTART });
+      return;
+    }
+    if (text === "/tour") {
+      await addMessage({ role: "cadence", text: FIRST_RUN_TOUR });
       return;
     }
     if (text === "/setup") {
@@ -1070,7 +1062,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   };
 
   const visibleMessages = useMemo(() => messages.slice(-(compact ? 5 : 8)), [compact, messages]);
-  const showWelcome = messages.length === 1 && stages.every((stage) => stage.status === "waiting");
+  const showWelcome = messages.length === 1 && messages[0]?.text.startsWith("Ask me anything") === true && stages.every((stage) => stage.status === "waiting");
   const pipelineActive = stages.some((stage) => stage.status !== "waiting");
   const showPipeline = (pipelineActive || Boolean(pendingEngineering) || Boolean(pendingReview) || Boolean(pendingQa) || Boolean(pendingWorkflow)) && lastRoute !== "chat" && lastRoute !== "explore";
 
@@ -1105,17 +1097,18 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
                 placeholder="Ask a question or describe what you want to build…"
               />
             </Box>
+            <CommandSuggestions suggestions={suggestedCommands} />
             <Box marginTop={1} justifyContent="space-between">
               <Text><Text color="cyan">mode {mode}</Text><Text dimColor> · budget {budgetMode} · limit {config.guardrails.maxModelCallsPerTask ?? "off"}</Text></Text>
               <Text dimColor>Claude + Codex + OpenCode</Text>
             </Box>
           </Box>
           <Box marginTop={1} width={Math.min(76, Math.max(44, columns - 8))} justifyContent="flex-end">
-            <Text><Text>ctrl+l</Text><Text dimColor> stages   </Text><Text> /doctor</Text><Text dimColor> runtimes</Text></Text>
+            <Text><Text>/quickstart</Text><Text dimColor> learn   </Text><Text>/help</Text><Text dimColor> commands   </Text><Text>ctrl+l</Text><Text dimColor> stages</Text></Text>
           </Box>
           <Box marginTop={3}>
             <Text color="yellow">● Tip </Text>
-            <Text dimColor>Ask a question, or say “implement…” to activate the pipeline.</Text>
+            <Text dimColor>Type / for workflows and press Tab to complete a command.</Text>
           </Box>
         </Box>
         <Box paddingX={1} justifyContent="space-between">
@@ -1201,30 +1194,46 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         </Box>
       </Box>
 
-      <Box borderStyle="round" borderColor={stageFocus ? "gray" : "cyan"} paddingX={1}>
-        <Text color="cyan">› </Text>
-        <TextInput
-          value={input}
-          onChange={setInput}
-          onSubmit={(value) => void submit(value)}
-          focus={!stageFocus}
-          placeholder={busy
-            ? "Working…"
-            : pendingEngineering
-              ? "Press Enter to run, /budget <mode>, or /cancel"
-              : pendingReview
-                ? "Press Enter to run the thorough review, or /cancel"
-                : pendingQa
-                  ? "Press Enter to run read-only ticket QA, or /cancel"
-                  : pendingWorkflow
-                    ? `Press Enter to run ${workflowLabel(pendingWorkflow.kind)}, or /cancel`
-                : "Ask anything, or describe an implementation task"}
-        />
+      <Box borderStyle="round" borderColor={stageFocus ? "gray" : "cyan"} paddingX={1} flexDirection="column">
+        <Box>
+          <Text color="cyan">› </Text>
+          <TextInput
+            value={input}
+            onChange={setInput}
+            onSubmit={(value) => void submit(value)}
+            focus={!stageFocus}
+            placeholder={busy
+              ? "Working…"
+              : pendingEngineering
+                ? "Press Enter to run, /budget <mode>, or /cancel"
+                : pendingReview
+                  ? "Press Enter to run the thorough review, or /cancel"
+                  : pendingQa
+                    ? "Press Enter to run read-only ticket QA, or /cancel"
+                    : pendingWorkflow
+                      ? `Press Enter to run ${workflowLabel(pendingWorkflow.kind)}, or /cancel`
+                  : "Ask anything, or describe an implementation task"}
+          />
+        </Box>
+        <CommandSuggestions suggestions={suggestedCommands} />
       </Box>
       <Box paddingX={1} justifyContent="space-between">
         <Text dimColor>{notice}</Text>
         <Text dimColor>Mode {mode} · Budget {budgetMode} · Limit {config.guardrails.maxModelCallsPerTask ?? "off"} · Model {modelSelection}{retryRequest ? " · retry ready" : ""} · /usage · /doctor</Text>
       </Box>
+    </Box>
+  );
+}
+
+function CommandSuggestions({ suggestions }: { suggestions: CommandGuide[] }) {
+  if (!suggestions.length) return null;
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {suggestions.map((guide, index) => (
+        <Text key={guide.command} dimColor={index !== 0} color={index === 0 ? "cyan" : undefined}>
+          {index === 0 ? "tab → " : "      "}{guide.usage} · {guide.summary}
+        </Text>
+      ))}
     </Box>
   );
 }
@@ -1301,9 +1310,9 @@ function workflowTarget(envelope: TaskEnvelope, kind: ReadOnlyWorkflowKind): str
 }
 
 function workflowCompletionNote(kind: ReadOnlyWorkflowKind): string {
-  if (kind === "refine") return "No source ticket was edited. Apply the proposed brief only after human review.";
-  if (kind === "release") return "No release, ticket, pull request, or deployment state was changed.";
-  if (kind === "plan") return "This is a challenged recommendation, not an approved commitment. Human owners still decide.";
+  if (kind === "refine") return "No source ticket was edited. After human review, use /pipeline <task> to implement the approved brief.";
+  if (kind === "release") return "No release, ticket, pull request, or deployment state was changed. Use /handoff to preserve blockers and owners.";
+  if (kind === "plan") return "This is a challenged recommendation, not an approved commitment. If approved, use /pipeline <task> to begin implementation.";
   if (kind === "crossrepo") return "No repository was modified. Authorize implementation separately after reviewing repository boundaries and Git state.";
   return "The handoff is local and may still contain proposals that the next person should verify.";
 }

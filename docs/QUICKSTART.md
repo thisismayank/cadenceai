@@ -46,6 +46,8 @@ git status --short
 cadenceai
 ~~~
 
+The first launch in a project shows a tour without invoking a model. Reopen it with `/tour`. Type `/` to see command suggestions, press Tab to complete the first match, or use `/help <command>` for purpose, cost, safety, and examples.
+
 Ask a normal question first:
 
 ~~~
@@ -112,3 +114,5 @@ cadenceai update
 ~~~
 
 This prints checkout-aware, fast-forward-only update instructions. CadenceAI never updates itself in the background.
+
+For a complete example, continue with the [ticket-to-handoff walkthrough](./WALKTHROUGH.md).

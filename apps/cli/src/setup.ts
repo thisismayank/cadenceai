@@ -84,7 +84,7 @@ export async function runSetupCommand(
       : "Engineering: Balanced by default · no per-task call ceiling",
     "",
     "Next: cd into a Git repository and run cadenceai.",
-    "Inside CadenceAI, use /quickstart for the five-minute walkthrough or /doctor for runtime help.",
+    "The first project launch shows a zero-cost tour. Use /quickstart for the five-minute walkthrough, /help for every command, or /doctor for runtime help.",
     "",
   ].join("\n"));
   return 0;

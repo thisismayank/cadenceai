@@ -1,56 +1,41 @@
 # CadenceAI
 
-Self-hosted control plane for agent-assisted software engineering. CadenceAI turns a task into an evidence-backed, verify-before-merge workflow.
+CadenceAI is a continuous terminal assistant that routes each request to the right level of effort: direct conversation, read-only investigation, engineering, review, QA, planning, release assessment, or handoff.
 
-**Status:** Internal alpha. The local terminal interface can use authenticated Codex and Claude CLIs for direct conversation and pipeline planning; workflow execution is still under development.
+It runs authenticated Claude Code, Codex, and OpenCode commands already installed on your machine. CadenceAI does not require model API keys of its own, and routing decisions are made locally without spending a model call.
 
-See [`SPEC.md`](./SPEC.md) for the V1 spec and [`DECISIONS.md`](./DECISIONS.md) for the resolved V1 decision tree.
+> Status: internal alpha. The terminal product is functional and intended for trusted developer testing. Cross-repository work is planning-only, and public packaging is not finalized.
 
----
+## What it does
 
-## Stack
-
-- **Web + API + Inngest handler:** Next.js on Vercel
-- **DB:** Neon Postgres via Drizzle ORM
-- **Workflow engine:** Inngest
-- **Sandbox (Phase 1):** E2B
-- **Agent runner (Phase 1):** Claude Code CLI inside sandbox
-
-Monorepo via pnpm workspaces.
-
-## Product surfaces
-
-CadenceAI has two complementary interfaces:
-
-- **Web UI:** the evidence and trust surface for stage timelines, plans, diffs, test reports, findings, cost, and approvals.
-- **CLI:** a continuous assistant for normal developer Q&A and the fast control surface for pipeline work.
-
-The terminal adapts to the request. Questions receive direct answers; clear implementation requests activate an inspectable, test-first cadence. Large review artifacts can still live in the web evidence surface.
-
-The internal-alpha workflow is:
+Ask naturally:
 
 ```text
-Task → Analyzer → Implementer → Tester → Adversarial → Human approval → Draft PR
+What does this error mean?
+Summarize ELM-2851
+Implement the approved requirements for ELM-2851
+Assess ELM-2851 against its linked pull requests
+Plan a better developer onboarding experience
 ```
 
-The analyzer emits a typed execution plan using capability profiles such as `coding`, `fast_judge`, and `adversarial_reasoner`. Provider-specific model names are resolved later by adapters and are not embedded in workflow definitions.
+CadenceAI classifies the request locally, shows the selected path, and requires a confirmation preflight before multi-model work or code modification.
 
-## Local agent CLIs
+| Workflow | Use it for | Planned calls by default |
+| --- | --- | ---: |
+| Chat | Normal questions with the selected model | 1 |
+| Explore | Repository, Linear, or GitHub investigation | 1 |
+| Engineering | Risk-adaptive, test-first implementation | 1–5 plus optional context |
+| PR review | Correctness, security, maintainability, and test gaps | 6 |
+| Ticket QA | Requirements versus linked PR and CI evidence | 6 |
+| Ticket refinement | Development-ready requirements and acceptance criteria | 3 |
+| Release readiness | Scope, implementation, operations, and go/no-go decision | 6 |
+| Challenged planning | Product, UX, engineering, commercial, and adversarial perspectives | 6 |
+| Cross-repository planning | Contracts, dependencies, compatibility, and rollout order | 6 |
+| Session handoff | Durable continuation brief | 1 |
 
-CadenceAI is being built to use existing authenticated coding-agent commands rather than requiring model API keys. The agent package currently includes:
+## Install
 
-- Codex CLI diagnostics and noninteractive execution with model, reasoning, sandbox, JSONL, and schema controls.
-- Claude Code diagnostics and noninteractive execution with model, effort, permissions, allowed tools, and schema controls.
-- OpenCode diagnostics and noninteractive execution, allowing configured provider/model pairs such as DeepSeek, Kimi, or local models to participate without CadenceAI owning their credentials.
-- Capability-based model routing with ordered fallback candidates.
-
-Authenticate with the vendor CLIs themselves (`codex login` and `claude auth login`). CadenceAI does not read or store their credentials.
-
-## Terminal interface
-
-The primary CadenceAI interface is a continuous terminal conversation.
-
-For a self-service local installation:
+CadenceAI requires Node.js 20 or newer, Git, and at least one authenticated agent CLI.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thisismayank/cadenceai/master/scripts/install.sh | bash
@@ -58,179 +43,132 @@ cadenceai setup
 cadenceai doctor
 ```
 
-If you prefer to inspect the installer before running it:
+The installer uses a dedicated checkout under `$HOME/.local/share/cadenceai`, links `cadenceai` and `cadence` under `$HOME/.local/bin`, and refuses to replace unrelated commands.
+
+To inspect the installer first:
 
 ```bash
 git clone https://github.com/thisismayank/cadenceai.git
-cd cadenceai && CADENCEAI_INSTALL_ROOT="$PWD" ./scripts/install.sh
-cadenceai setup
-cadenceai doctor
+cd cadenceai
+CADENCEAI_INSTALL_ROOT="$PWD" ./scripts/install.sh
 ```
 
-The installer refuses to replace unrelated commands. See [the five-minute Starter quickstart](./docs/QUICKSTART.md) for the complete first-run journey.
+CadenceAI uses credentials managed by Claude Code, Codex, or OpenCode. It does not read or store those credentials.
 
-During development, launch it from the repository root:
+## First five minutes
 
 ```bash
+cd /path/to/your/project
+cadenceai
+```
+
+The first launch in a project displays a zero-cost tour. You can reopen it with `/tour`.
+
+Inside the terminal:
+
+```text
+What does this error mean?
+/explore Summarize ELM-2851
+/refine ELM-2851
+/pipeline Implement the approved ELM-2851 requirements
+/qa ELM-2851
+/handoff
+```
+
+Type `/` to see command suggestions and press Tab to complete the first match. Use:
+
+- `/help` for every command;
+- `/help qa` or `/help refine` for purpose, cost, safety, and examples;
+- `/quickstart` for the five-minute walkthrough;
+- `/pipelines` to inspect configured stage sequences;
+- `Ctrl+L` to focus and expand the active stage sidebar.
+
+See the [Starter quickstart](./docs/QUICKSTART.md) and [ticket-to-handoff walkthrough](./docs/WALKTHROUGH.md) for copyable journeys.
+
+## Workflow commands
+
+```text
+/chat <question>       Direct conversation without tools
+/explore <request>     Read-only repository and connector research
+/pipeline <task>       Engineering with Git safety and verification
+/review <PR>           Independent pull-request review
+/qa <ticket>           Requirements-to-implementation assessment
+/refine <ticket>       Pre-development requirement refinement
+/release <scope>       Release readiness and go/no-go report
+/plan <proposal>       Multi-perspective challenged plan
+/crossrepo <change>    Read-only multi-repository coordination plan
+/handoff [focus]       Save a local continuation brief
+```
+
+Natural-language routing works without slash commands. Slash commands are available when you want an explicit route.
+
+## Safety model
+
+- Normal chat has tools disabled where the underlying runner supports it.
+- Exploration, review, QA, refinement, release, planning, and cross-repository discovery are read-only.
+- Retrieved tickets, comments, diffs, and documents are treated as untrusted source material.
+- Engineering requires a Git repository with a clean working tree, shows a call-count preflight, and checks Git again immediately before execution.
+- CadenceAI never commits, pushes, reverts, deletes, posts comments, or changes tickets automatically.
+- Cross-repository mode does not mutate repositories. Launch from a shared parent directory when sibling repositories must be inspected.
+- Handoffs are stored under `.cadence/handoffs/`; common credential shapes are redacted from the durable file.
+- Sessions and the usage ledger stay under `.cadence/`, which is ignored by Git.
+
+## Models, budgets, and plan limits
+
+Use `/models` and `/model <alias>` to choose the normal-chat model. Pipeline stages use capability profiles with ordered Claude, Codex, or OpenCode fallbacks.
+
+Starter setup defaults to Economy engineering and a maximum of six planned model calls per task:
+
+```text
+/budget economy
+/limit 6
+/usage
+```
+
+`/usage` is a local activity ledger, not an authoritative provider subscription balance. Quota-like failures place the provider on a temporary in-process cooldown and preserve the request for `/retry`.
+
+## Linear and GitHub context
+
+CadenceAI delegates connected retrieval to the authenticated underlying CLI. If Claude or Codex already has a Linear MCP connection, requests such as `Summarize ELM-2851`, `/refine ELM-2851`, and `/qa ELM-2851` can reuse it.
+
+GitHub pull-request evidence is inspected through read-only `gh` commands. QA and release workflows distinguish reported CI evidence from tests actually executed locally.
+
+## Configuration
+
+Run `/config init` to create a shareable `.cadenceai.json` in the current project. Edit it to change:
+
+- chat aliases and defaults;
+- ordered models for each capability profile;
+- default engineering budget and per-task call ceiling;
+- risk keywords;
+- engineering verification commands;
+- stages and models for review, QA, refinement, release, planning, cross-repository, and handoff workflows.
+
+Run `/config reload` after editing. Personal defaults can live at `~/.config/cadenceai/config.json`; project settings take precedence. Credentials remain in the provider CLIs rather than CadenceAI configuration.
+
+## Updating and troubleshooting
+
+```bash
+cadenceai doctor
+cadenceai update
+```
+
+`doctor` checks installation and authentication with remediation commands. `update` prints checkout-aware, fast-forward-only instructions and never updates in the background.
+
+Inside the TUI, use `/retry` after a provider failure and `/doctor` for runtime diagnostics.
+
+## Development
+
+The active product lives in `apps/cli`; model routing and CLI adapters live in `packages/agents`. Other workspace packages are experimental and are not required to run the terminal product.
+
+```bash
+git clone git@github.com:thisismayank/cadenceai.git
+cd cadenceai
+pnpm install
+pnpm --filter @cadenceai/cli test
+pnpm --filter @cadenceai/cli typecheck
 pnpm --filter @cadenceai/cli build
 ./apps/cli/dist/index.js
 ```
 
-Or run the TypeScript development entrypoint:
-
-```bash
-pnpm cli
-```
-
-Pass a project directory or resume the latest local session:
-
-```bash
-./apps/cli/dist/index.js /path/to/project
-./apps/cli/dist/index.js --continue
-```
-
-Inside the TUI:
-
-- Ask an ordinary question to get a direct answer without activating agents or repository tools.
-- Ask CadenceAI to fetch or summarize a Linear ticket to use the underlying runner's existing MCP connection read-only.
-- Describe a clear implementation task (for example, `implement ENG-123`) to resolve connected context and activate a risk-sized test-first pipeline.
-- Ask it to review a pull request to run an independent, read-only review cadence over the real diff.
-- Ask it to assess or QA a Linear ticket to retrieve requirements and comments, discover linked pull requests, inspect diffs and CI checks, and produce a release-oriented coverage report.
-- Refine a ticket before development, challenge a product plan, assess a release, coordinate a cross-repository change plan, or save a durable session handoff.
-- Use `/chat <question>` or `/pipeline <task>` to override automatic routing once.
-- Use `/explore <request>` to force connected exploration, `/review <PR>` for PR review, `/qa <ticket>` for implementation QA, `/refine <ticket>` for requirement readiness, `/release <scope>` for go/no-go assessment, `/plan <proposal>` for challenged planning, `/crossrepo <change>` for multi-repository coordination, or `/handoff [focus]` to save a continuation brief.
-- Use `/mode auto`, `/mode chat`, or `/mode pipeline` to control routing for subsequent messages.
-- Use `/models` and `/model <alias>` to select the model used for ordinary conversation. Direct OpenCode references use `/model opencode/<provider>/<model>`.
-- Use `/budget economy`, `/budget balanced`, or `/budget thorough` to control engineering depth. Balanced is the default.
-- Starter setup selects Economy by default and a six-call ceiling. Use `/limit <number>` or `/limit off` for a temporary session override.
-- Engineering runs only inside a Git repository with a clean working tree. Commit or stash existing changes before submitting an implementation task.
-- Type `/usage` to view CadenceAI's local seven-day activity ledger and active provider cooldowns. It is not a provider quota balance.
-- Referential requests such as `implement that` locally freeze recent substantive conversation into the engineering preflight. Use `/context view` to inspect the full capsule or `/context none` to remove it.
-- Type `/doctor` to inspect installed versions and authentication for Claude, Codex, and OpenCode.
-- Type `/retry` after a provider failure to retry the preserved request and frozen context, or `/quickstart` for the guided first task.
-- Press `Ctrl+L` to focus the cadence sidebar, use the arrow keys to select a stage, and press Enter to expand its details and streamed events.
-- Type `/stages` to focus the same navigator, `/new` to clear the active cadence, or `/exit` to close the session.
-- Type `/cancel` to stop any pending workflow preflight before a model is invoked.
-
-After linking the package globally, launch it from any project with either `cadenceai` or `cadence`.
-
-Sessions are append-only JSONL files under `.cadence/sessions/` in the target project. The directory is local and ignored by Git.
-
-## Routing and risk
-
-CadenceAI separates the requested outcome from its context:
-
-| Intent | Behavior |
-| --- | --- |
-| Conversation | Direct response from the selected chat model, with tools disabled where the runner supports it |
-| Exploration | Read-only repository and configured MCP tools |
-| Engineering | Optional connected-context resolution followed by risk-adaptive investigation, test design, implementation, deterministic verification, adversarial review, and human review |
-| Pull-request review | Read-only evidence collection followed by requirements, correctness, test-gap, adversarial, and synthesis stages |
-| Ticket QA | Read-only Linear and linked-PR evidence collection followed by requirement mapping, implementation coverage, verification-gap, adversarial, and report stages |
-| Ticket refinement | Three-call pre-development critique and ready-for-development brief; the ticket is never edited automatically |
-| Release readiness | Six-call scope, coverage, operational, adversarial, and go/no-go assessment over tickets and PRs |
-| Challenged planning | Six perspectives spanning product, UX, engineering, commercial concerns, adversarial review, and synthesis |
-| Cross-repository planning | Read-only contract, dependency, sequencing, integration-risk, and coordinated-change analysis |
-| Session handoff | One-call synthesis saved locally as Markdown under `.cadence/handoffs/` |
-
-Engineering tasks are classified as low, medium, or high risk. Low-risk work uses a shorter cadence; security, authentication, billing, permissions, migrations, and other configured high-risk areas receive the full adversarial cadence.
-
-Engineering requests stop at a local preflight before invoking a model. CadenceAI first requires a clean Git working tree, then shows the expected model-call count, deterministic stages, and selected cadence; press Enter to proceed, change `/budget`, or `/cancel`. The clean-tree check runs again immediately before execution so changes made while the preflight is open cannot be mixed into the agent's work. Economy minimizes calls, Balanced adds independent reasoning according to risk, and Thorough uses every configured stage. High-risk Economy work still retains analyzer and adversarial scrutiny.
-
-After an engineering run, CadenceAI reports the resulting Git status alongside the pipeline's verification summary. It does not automatically commit, revert, or delete files; review with normal Git tools and decide what to keep. This keeps recovery understandable without maintaining a second snapshot or rollback system.
-
-Pull-request review is read-only and always uses its configured thorough cadence. It has its own confirmation preflight showing the review target, stages, and expected model-call count. Engineering budget modes do not silently weaken review scrutiny.
-
-Ticket QA is also read-only and uses six model calls in the default configuration: one connected evidence pass and five independent assessment stages. For example, `/qa ELM-2851` fetches the ticket and comments, discovers linked GitHub pull requests, inspects their diffs and reported CI checks, and returns a requirement-coverage matrix with a Pass, Conditional Pass, Fail, or Insufficient Evidence verdict. It does not silently check out or execute untrusted PR code locally; absent execution evidence is labeled unverified. Confirmed findings can be carried into a later engineering request only after its normal clean-Git preflight.
-
-The additional decision workflows use the same explicit preflight and model-call ceiling. Ticket refinement uses three calls and handoff uses one; release readiness, challenged planning, and cross-repository planning use six calls each by default. They are read-only with respect to project repositories and external systems; handoff creates one local session artifact under `.cadence/`. Cross-repository mode requires repository paths to be accessible from the directory where CadenceAI was launched—launch it from a shared parent when coordinating sibling repositories—and produces an authorization-ready plan rather than mutating multiple worktrees.
-
-When an engineering request refers to prior discussion, CadenceAI captures up to eight recent substantive turns within a bounded local context capsule. Interface messages and previous preflights are excluded, `/new` forms a hard context boundary, and explicit ticket or risk signals in the capsule influence connected-context resolution and risk selection. The frozen capsule is shown before execution and prior assistant statements are labeled as untrusted proposals that agents must verify.
-
-Quota-like provider errors activate a temporary in-process cooldown, allowing the router to fall back without repeatedly retrying an exhausted provider. Successful calls are recorded locally in `.cadence/usage.jsonl`.
-
-Failed chat, exploration, engineering, review, QA, refinement, release, planning, cross-repository, and handoff requests remain retryable within the session. CadenceAI explains active cooldowns and directs the user toward another chat model, Economy mode, waiting for reset, or runtime remediation. It cannot read an authoritative Claude or Codex subscription balance.
-
-Routing itself is local and does not spend a model call. CadenceAI shows the selected path immediately (for example, `Connected → claude/sonnet → Linear ENG-123`), streams direct-chat output, caches CLI authentication checks briefly, and remembers the last successful connected runner per capability. Direct conversations resume provider sessions when Claude, Codex, or OpenCode exposes a session identifier; connected read-only lookups remain isolated one-shot sessions.
-
-## Model and pipeline configuration
-
-Run `/config init` inside the TUI to create a shareable `.cadenceai.json` in the target project. Edit it to change:
-
-- normal-chat aliases and defaults;
-- the default budget mode;
-- the maximum permitted model calls per task;
-- ordered model candidates for each capability profile;
-- keywords used by the risk classifier;
-- stages selected for low-, medium-, and high-risk engineering tasks;
-- automatic or explicit deterministic verification commands;
-- pull-request review, ticket QA, refinement, release, planning, cross-repository, and handoff stages and their model profiles.
-
-Run `/config reload` after editing. A personal override can also live at `~/.config/cadenceai/config.json`; project settings take precedence. Configuration is validated before it is activated. Credentials remain in Claude, Codex, OpenCode, and their MCP/provider configuration rather than in `.cadenceai.json`.
-
-## Repository structure
-
-```text
-cadenceai/
-├── apps/
-│   └── web/                # Next.js app (dashboard + API + Inngest handler)
-└── packages/
-    ├── db/                 # Drizzle schema + client
-    ├── schemas/            # Zod schemas + state machine
-    ├── workflows/          # Inngest functions
-    ├── agents/             # AgentProvider interface + Mock
-    ├── sandboxes/          # SandboxProvider interface + Mock
-    └── shared/             # env + common types
-```
-
----
-
-## Local dev
-
-Requires Node 20+ and pnpm 11+.
-
-```bash
-# 1. Install (already done if you cloned after Phase 0)
-pnpm install
-
-# 2. Copy env template and fill in DATABASE_URL at minimum
-cp .env.example apps/web/.env.local
-# Edit apps/web/.env.local:
-#   DATABASE_URL=postgres://…neon.tech/neondb?sslmode=require
-#   CADENCEAI_MASTER_KEY=$(openssl rand -hex 32)
-
-# 3. Push schema to your Neon DB (or a local Postgres)
-DATABASE_URL="…" pnpm db:generate   # creates SQL migrations from Drizzle schema
-DATABASE_URL="…" pnpm db:migrate    # applies them
-
-# 4. Start the app
-pnpm dev
-# → http://localhost:3000
-
-# 5. In a second terminal, start the Inngest dev server
-npx inngest-cli@latest dev -u http://localhost:3000/api/inngest
-# → http://localhost:8288
-```
-
-## Typecheck
-
-```bash
-pnpm -r typecheck
-```
-
----
-
-## What Phase 0 does
-
-- Create a Task via the UI or API.
-- Create an Execution for that Task.
-- Execution runs a **mock** Inngest workflow that walks through the state machine (Implementer → Tester → Adversarial → AwaitingApproval → CreatingPR → Completed) with fake delays. No agents, no sandbox, no diff.
-- Dashboard shows Task list, Execution list, and per-execution state timeline.
-
-Phase 1 replaces the mock workflow with real Impl / Test / Adv stages backed by E2B + Claude Code CLI.
-
----
-
-## What Phase 0 explicitly does NOT do
-
-See [`DECISIONS.md`](./DECISIONS.md) §"What V1 Explicitly Does NOT Include" for the full list. TL;DR: no agents, no sandbox execution, no GitHub PR creation, no confidence score computation, no auth, no cost tracking.
+The project is currently an internal alpha. Add an explicit open-source license and contribution policy before describing it as a public open-source release.

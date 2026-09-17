@@ -35,6 +35,7 @@ export const QUICKSTART = [
   "   /handoff",
   "",
   "CadenceAI does not commit, push, revert, or delete your work automatically.",
+  "Use /help <command> for purpose, cost, safety, and examples.",
   "Use /usage for local call history, /retry after a provider failure, and /doctor for remediation.",
 ].join("\n");
 
