@@ -4,4 +4,5 @@ export * from "./cli/types";
 export * from "./cli/process-runner";
 export * from "./cli/codex";
 export * from "./cli/claude";
+export * from "./cli/opencode";
 export * from "./cli/router";

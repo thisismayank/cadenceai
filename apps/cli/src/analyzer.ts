@@ -2,9 +2,12 @@ import {
   ClaudeCliAdapter,
   CodexCliAdapter,
   ModelRouter,
+  OpenCodeCliAdapter,
   type CliStreamEvent,
+  type ModelPolicy,
   type RoutingResult,
 } from "@cadenceai/agents";
+import { recordRoutingUsage } from "./usage.ts";
 
 export type AnalyzerCallbacks = {
   onStream: (event: CliStreamEvent) => void;
@@ -14,11 +17,13 @@ export async function analyzeTask(
   task: string,
   cwd: string,
   callbacks: AnalyzerCallbacks,
+  policy?: ModelPolicy,
 ): Promise<RoutingResult> {
-  const router = new ModelRouter([new CodexCliAdapter(), new ClaudeCliAdapter()]);
-  return router.execute("fast_classifier", {
+  const router = new ModelRouter([new CodexCliAdapter(), new ClaudeCliAdapter(), new OpenCodeCliAdapter()], policy);
+  const result = await router.execute("fast_classifier", {
     cwd,
     permission: "read-only",
+    allowedTools: ["Read", "Grep", "Glob"],
     prompt: [
       "You are CadenceAI's analyzer. Assess the engineering task and produce an EXECUTION_PLAN artifact.",
       "The plan must use a test-first cadence: ANALYZE, parallel INVESTIGATE and TEST_DESIGN, IMPLEMENT, VERIFY, ADVERSARIAL, then HUMAN_REVIEW.",
@@ -27,6 +32,8 @@ export async function analyzeTask(
     ].join("\n\n"),
     onEvent: callbacks.onStream,
   });
+  await recordRoutingUsage(cwd, "fast_classifier", result).catch(() => undefined);
+  return result;
 }
 
 export type PlannedStageView = {

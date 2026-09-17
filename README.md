@@ -2,7 +2,7 @@
 
 Self-hosted control plane for agent-assisted software engineering. CadenceAI turns a task into an evidence-backed, verify-before-merge workflow.
 
-**Status:** Internal alpha foundation. CRUD, state machine, analyzer contract, and mock workflow only. No production agents yet.
+**Status:** Internal alpha. The local terminal interface can use authenticated Codex and Claude CLIs for direct conversation and pipeline planning; workflow execution is still under development.
 
 See [`SPEC.md`](./SPEC.md) for the V1 spec and [`DECISIONS.md`](./DECISIONS.md) for the resolved V1 decision tree.
 
@@ -20,12 +20,12 @@ Monorepo via pnpm workspaces.
 
 ## Product surfaces
 
-CadenceAI intentionally has two interfaces backed by the same API:
+CadenceAI has two complementary interfaces:
 
 - **Web UI:** the evidence and trust surface for stage timelines, plans, diffs, test reports, findings, cost, and approvals.
-- **CLI (planned):** the fast control surface for submitting, watching, retrying, cancelling, and approving executions from a terminal or CI job.
+- **CLI:** a continuous assistant for normal developer Q&A and the fast control surface for pipeline work.
 
-The UI is not an agent chat interface. The terminal is not expected to render large review artifacts. Keeping those responsibilities separate lets developers stay in their normal workflow without sacrificing reviewability for teams.
+The terminal adapts to the request. Questions receive direct answers; clear implementation requests activate an inspectable, test-first cadence. Large review artifacts can still live in the web evidence surface.
 
 The internal-alpha workflow is:
 
@@ -41,6 +41,7 @@ CadenceAI is being built to use existing authenticated coding-agent commands rat
 
 - Codex CLI diagnostics and noninteractive execution with model, reasoning, sandbox, JSONL, and schema controls.
 - Claude Code diagnostics and noninteractive execution with model, effort, permissions, allowed tools, and schema controls.
+- OpenCode diagnostics and noninteractive execution, allowing configured provider/model pairs such as DeepSeek, Kimi, or local models to participate without CadenceAI owning their credentials.
 - Capability-based model routing with ordered fallback candidates.
 
 Authenticate with the vendor CLIs themselves (`codex login` and `claude auth login`). CadenceAI does not read or store their credentials.
@@ -69,12 +70,59 @@ Pass a project directory or resume the latest local session:
 
 Inside the TUI:
 
-- Send the first message to run the analyzer through the capability router.
-- Type `/doctor` to inspect installed versions and authentication for Codex and Claude.
+- Ask an ordinary question to get a direct answer without activating agents or repository tools.
+- Ask CadenceAI to fetch or summarize a Linear ticket to use the underlying runner's existing MCP connection read-only.
+- Describe a clear implementation task (for example, `implement ENG-123`) to resolve connected context and activate a risk-sized test-first pipeline.
+- Ask it to review a pull request to run an independent, read-only review cadence over the real diff.
+- Use `/chat <question>` or `/pipeline <task>` to override automatic routing once.
+- Use `/explore <request>` to force connected, read-only exploration or `/review <PR>` to force the review pipeline.
+- Use `/mode auto`, `/mode chat`, or `/mode pipeline` to control routing for subsequent messages.
+- Use `/models` and `/model <alias>` to select the model used for ordinary conversation. Direct OpenCode references use `/model opencode/<provider>/<model>`.
+- Use `/budget economy`, `/budget balanced`, or `/budget thorough` to control engineering depth. Balanced is the default.
+- Type `/usage` to view CadenceAI's local seven-day activity ledger and active provider cooldowns. It is not a provider quota balance.
+- Referential requests such as `implement that` locally freeze recent substantive conversation into the engineering preflight. Use `/context view` to inspect the full capsule or `/context none` to remove it.
+- Type `/doctor` to inspect installed versions and authentication for Claude, Codex, and OpenCode.
 - Press `Ctrl+L` to focus the cadence sidebar, use the arrow keys to select a stage, and press Enter to expand its details and streamed events.
-- Type `/stages` to focus the same navigator or `/exit` to close the session.
+- Type `/stages` to focus the same navigator, `/new` to clear the active cadence, or `/exit` to close the session.
+
+After linking the package globally, launch it from any project with either `cadenceai` or `cadence`.
 
 Sessions are append-only JSONL files under `.cadence/sessions/` in the target project. The directory is local and ignored by Git.
+
+## Routing and risk
+
+CadenceAI separates the requested outcome from its context:
+
+| Intent | Behavior |
+| --- | --- |
+| Conversation | Direct response from the selected chat model, with tools disabled where the runner supports it |
+| Exploration | Read-only repository and configured MCP tools |
+| Engineering | Optional connected-context resolution followed by risk-adaptive investigation, test design, implementation, deterministic verification, adversarial review, and human review |
+| Pull-request review | Read-only evidence collection followed by requirements, correctness, test-gap, adversarial, and synthesis stages |
+
+Engineering tasks are classified as low, medium, or high risk. Low-risk work uses a shorter cadence; security, authentication, billing, permissions, migrations, and other configured high-risk areas receive the full adversarial cadence.
+
+Engineering requests stop at a local preflight before invoking a model. The preflight shows the expected model-call count, deterministic stages, and selected cadence; press Enter to proceed, change `/budget`, or `/cancel`. Economy minimizes calls, Balanced adds independent reasoning according to risk, and Thorough uses every configured stage. High-risk Economy work still retains analyzer and adversarial scrutiny.
+
+When an engineering request refers to prior discussion, CadenceAI captures up to eight recent substantive turns within a bounded local context capsule. Interface messages and previous preflights are excluded, `/new` forms a hard context boundary, and explicit ticket or risk signals in the capsule influence connected-context resolution and risk selection. The frozen capsule is shown before execution and prior assistant statements are labeled as untrusted proposals that agents must verify.
+
+Quota-like provider errors activate a temporary in-process cooldown, allowing the router to fall back without repeatedly retrying an exhausted provider. Successful calls are recorded locally in `.cadence/usage.jsonl`.
+
+Routing itself is local and does not spend a model call. CadenceAI shows the selected path immediately (for example, `Connected → claude/sonnet → Linear ENG-123`), streams direct-chat output, caches CLI authentication checks briefly, and remembers the last successful connected runner per capability. Direct conversations resume provider sessions when Claude, Codex, or OpenCode exposes a session identifier; connected read-only lookups remain isolated one-shot sessions.
+
+## Model and pipeline configuration
+
+Run `/config init` inside the TUI to create a shareable `.cadenceai.json` in the target project. Edit it to change:
+
+- normal-chat aliases and defaults;
+- the default budget mode;
+- ordered model candidates for each capability profile;
+- keywords used by the risk classifier;
+- stages selected for low-, medium-, and high-risk engineering tasks;
+- automatic or explicit deterministic verification commands;
+- pull-request review stages and their model profiles.
+
+Run `/config reload` after editing. A personal override can also live at `~/.config/cadenceai/config.json`; project settings take precedence. Configuration is validated before it is activated. Credentials remain in Claude, Codex, OpenCode, and their MCP/provider configuration rather than in `.cadenceai.json`.
 
 ## Repository structure
 
