@@ -116,3 +116,5 @@ cadenceai update
 This prints checkout-aware, fast-forward-only update instructions. CadenceAI never updates itself in the background.
 
 For a complete example, continue with the [ticket-to-handoff walkthrough](./WALKTHROUGH.md).
+
+Maintainers and contributors should continue with the [development guide](./DEVELOPMENT.md) and [architecture guide](./ARCHITECTURE.md).

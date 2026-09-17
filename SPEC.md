@@ -1,5 +1,7 @@
 # Agent Engineering Control Plane
 
+> **Historical design document.** This specification describes the earlier hosted control-plane direction and is not the implementation contract for the current local terminal product. Start with the [README](./README.md), [architecture guide](./docs/ARCHITECTURE.md), and [workflow reference](./docs/WORKFLOWS.md).
+
 ## V1 Product & Technical Specification
 
 ### Working Name

@@ -4,10 +4,13 @@
   "version": "0.0.0",
   "packageManager": "pnpm@11.24.0",
   "scripts": {
-    "dev": "pnpm --filter @cadenceai/web dev",
+    "dev": "pnpm --filter @cadenceai/cli dev",
+    "dev:web": "pnpm --filter @cadenceai/web dev",
     "cli": "pnpm --filter @cadenceai/cli dev",
     "build": "pnpm -r build",
+    "test": "pnpm --filter @cadenceai/agents test && pnpm --filter @cadenceai/cli test",
     "typecheck": "pnpm -r typecheck",
+    "validate": "pnpm --filter @cadenceai/agents test && pnpm --filter @cadenceai/cli test && pnpm --filter @cadenceai/agents typecheck && pnpm --filter @cadenceai/cli typecheck && pnpm --filter @cadenceai/cli build",
     "db:generate": "pnpm --filter @cadenceai/db generate",
     "db:migrate": "pnpm --filter @cadenceai/db migrate",
     "db:studio": "pnpm --filter @cadenceai/db studio"

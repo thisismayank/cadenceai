@@ -1,5 +1,7 @@
 # CadenceAI V1 — Resolved Decision Tree
 
+> **Historical design document.** These decisions belong to the earlier hosted control-plane direction. For the current local terminal product, use the [README](./README.md), [architecture guide](./docs/ARCHITECTURE.md), and [configuration reference](./docs/CONFIGURATION.md).
+
 Companion to `SPEC.md`. Every load-bearing V1 decision, in dependency order, with the alternative that was rejected.
 
 Grilling session: 2026-08-28.

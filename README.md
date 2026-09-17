@@ -165,10 +165,22 @@ The active product lives in `apps/cli`; model routing and CLI adapters live in `
 git clone git@github.com:thisismayank/cadenceai.git
 cd cadenceai
 pnpm install
-pnpm --filter @cadenceai/cli test
-pnpm --filter @cadenceai/cli typecheck
-pnpm --filter @cadenceai/cli build
+pnpm validate
 ./apps/cli/dist/index.js
 ```
 
-The project is currently an internal alpha. Add an explicit open-source license and contribution policy before describing it as a public open-source release.
+## Maintainer handbook
+
+- [Architecture](./docs/ARCHITECTURE.md): runtime boundaries, lifecycle, persistence, and extension points.
+- [Configuration](./docs/CONFIGURATION.md): precedence, profiles, pipelines, budgets, and guardrails.
+- [Workflows](./docs/WORKFLOWS.md): behavior, cost, tools, outputs, and safety for every route.
+- [Providers and connectors](./docs/PROVIDERS-AND-CONNECTORS.md): authentication, model routing, MCP, GitHub, fallbacks, and quotas.
+- [Development](./docs/DEVELOPMENT.md): setup, validation, and common change recipes.
+- [Troubleshooting](./docs/TROUBLESHOOTING.md): installation, authentication, connector, Git, quota, and retry failures.
+- [Releases](./docs/RELEASES.md): protected-branch policy, release checklist, and rollback.
+- [Roadmap](./docs/ROADMAP.md), [changelog](./CHANGELOG.md), and [contribution guide](./CONTRIBUTING.md).
+- [Agent guidance](./AGENTS.md): product invariants and repository map for coding agents.
+
+`SPEC.md` and `DECISIONS.md` describe the earlier hosted control-plane exploration. They remain as historical design context and are not the implementation contract for the current local CLI.
+
+The project is currently an internal alpha. A public repository is not automatically open source: choose and add an explicit license before inviting unrestricted reuse or redistribution.
