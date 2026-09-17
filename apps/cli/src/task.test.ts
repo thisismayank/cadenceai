@@ -27,6 +27,19 @@ test("ordinary questions remain direct conversation", () => {
   assert.equal(envelope.needsConnectedTools, false);
 });
 
+test("ticket assessment and QA requests use the quality-assurance pipeline", () => {
+  for (const request of [
+    "QA ELM-2851 and find gaps in its linked PRs",
+    "Assess the requirements of ELM-2851 and validate the implementation",
+    "Check acceptance criteria and test gaps for ELM-2851",
+  ]) {
+    const envelope = createTaskEnvelope(request, DEFAULT_CONFIG);
+    assert.equal(envelope.intent, "qa");
+    assert.deepEqual(envelope.linearTickets, ["ELM-2851"]);
+    assert.equal(envelope.needsConnectedTools, true);
+  }
+});
+
 test("conversation signals carry ticket and risk context into referential engineering", () => {
   const envelope = createTaskEnvelope(
     "Okay, implement that",

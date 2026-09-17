@@ -20,6 +20,8 @@ export type ReviewExecutionPlan = {
   modelCalls: number;
 };
 
+export type QaExecutionPlan = ReviewExecutionPlan;
+
 const STAGE_POLICY: Record<BudgetMode, Record<RiskLevel, string[] | "configured">> = {
   economy: {
     low: ["implement", "verify", "human_review"],
@@ -68,11 +70,12 @@ export function planEngineeringExecution(
   };
 }
 
-export function formatExecutionPreflight(plan: EngineeringExecutionPlan): string {
+export function formatExecutionPreflight(plan: EngineeringExecutionPlan, maxModelCalls: number | null = null): string {
   return [
     `${plan.mode.toUpperCase()} · ${plan.risk.toUpperCase()}-RISK ENGINEERING`,
     "",
     `Expected model calls: ${plan.totalModelCalls}`,
+    `Per-task limit: ${maxModelCalls ?? "off"}`,
     ...(plan.connectedCalls ? [`  ${plan.connectedCalls} × connected context`] : []),
     `  ${plan.modelCalls} × engineering stages`,
     `Deterministic stages: ${plan.stages.filter((stage) => stage.modelProfile === "shell").map((stage) => stage.name).join(", ") || "none"}`,
@@ -96,15 +99,48 @@ export function planReviewExecution(config: CadenceConfig): ReviewExecutionPlan 
   };
 }
 
-export function formatReviewPreflight(plan: ReviewExecutionPlan, target: string): string {
+export function formatReviewPreflight(plan: ReviewExecutionPlan, target: string, maxModelCalls: number | null = null): string {
   return [
     "THOROUGH · PULL-REQUEST REVIEW",
     "",
     `Target: ${target}`,
     `Expected model calls: ${plan.modelCalls}`,
+    `Per-task limit: ${maxModelCalls ?? "off"}`,
     `Cadence: ${plan.stages.map((stage) => stage.name).join(" → ")}`,
     "",
     "PR review is read-only and currently always uses the configured thorough cadence; the active engineering budget does not reduce it.",
+    ...(plan.modelCalls >= 4 ? ["Plan note: this is a high-call operation intended for changes that warrant independent scrutiny."] : []),
     "Press Enter to continue or type /cancel.",
   ].join("\n");
+}
+
+export function planQaExecution(config: CadenceConfig): QaExecutionPlan {
+  const pipeline = config.pipelines.qualityAssurance;
+  const stageIds = pipeline.order.filter((id) => Boolean(pipeline.stages[id]));
+  const stages = stageIds.map((id) => pipeline.stages[id]!);
+  return {
+    stageIds,
+    stages,
+    modelCalls: stages.filter((stage) => stage.modelProfile !== "human" && stage.modelProfile !== "shell").length,
+  };
+}
+
+export function formatQaPreflight(plan: QaExecutionPlan, targets: string[], maxModelCalls: number | null = null): string {
+  return [
+    "THOROUGH · TICKET QA",
+    "",
+    `Target: ${targets.join(", ") || "ticket and linked implementation"}`,
+    `Expected model calls: ${plan.modelCalls}`,
+    `Per-task limit: ${maxModelCalls ?? "off"}`,
+    `Cadence: ${plan.stages.map((stage) => stage.name).join(" → ")}`,
+    "",
+    "QA is read-only. It retrieves ticket requirements, linked pull-request diffs, and CI/check evidence without changing files or external systems.",
+    "Verification uses reported repository and pull-request evidence. Missing local execution evidence is reported as unverified, never guessed.",
+    "Press Enter to continue or type /cancel.",
+  ].join("\n");
+}
+
+export function modelCallLimitViolation(calls: number, maxModelCalls: number | null): string | null {
+  if (maxModelCalls === null || calls <= maxModelCalls) return null;
+  return `This operation expects ${calls} model calls, above your configured limit of ${maxModelCalls}. Use /limit <number> to raise it, choose a leaner engineering budget, or cancel.`;
 }

@@ -6,6 +6,7 @@ import {
   clearConnectedAffinity,
   connectedCandidateOrder,
   connectedToolAllowlist,
+  extractGitHubPullRequestUrls,
   rememberConnectedCandidate,
 } from "./context.ts";
 import { createTaskEnvelope } from "./task.ts";
@@ -35,4 +36,27 @@ test("connected resolution remembers the last successful model per capability", 
   rememberConnectedCandidate(envelope, fallback);
   assert.deepEqual(connectedCandidateOrder(envelope, DEFAULT_CONFIG)[0], fallback);
   clearConnectedAffinity();
+});
+
+test("ticket QA authorizes linked-PR and CI evidence collection read-only", () => {
+  const envelope = createTaskEnvelope("Assess ENG-123 requirements and validate its implementation", DEFAULT_CONFIG);
+  const tools = connectedToolAllowlist(envelope);
+  const prompt = buildConnectedPrompt(envelope);
+  assert.equal(envelope.intent, "qa");
+  assert.equal(tools.includes("Bash(gh pr view *)"), true);
+  assert.equal(tools.includes("Bash(gh pr diff *)"), true);
+  assert.equal(tools.includes("Bash(gh pr checks *)"), true);
+  assert.match(prompt, /discover every linked GitHub pull-request URL/i);
+  assert.match(prompt, /distinguish remote CI evidence from tests run locally/i);
+});
+
+test("canonical pull-request URLs are extracted and deduplicated from connected evidence", () => {
+  assert.deepEqual(extractGitHubPullRequestUrls([
+    "See https://github.com/acme/app/pull/42.",
+    "Duplicate: https://github.com/acme/app/pull/42",
+    "Also https://github.com/acme/api/pull/9)",
+  ].join("\n")), [
+    "https://github.com/acme/app/pull/42",
+    "https://github.com/acme/api/pull/9",
+  ]);
 });

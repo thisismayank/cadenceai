@@ -2,26 +2,27 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import {
-  ClaudeCliAdapter,
-  CodexCliAdapter,
   getProviderCooldowns,
-  OpenCodeCliAdapter,
-  type CliDiagnostic,
 } from "@cadenceai/agents";
 import { analyzeTask } from "./analyzer.ts";
 import {
   formatExecutionPreflight,
+  formatQaPreflight,
   formatReviewPreflight,
+  modelCallLimitViolation,
   planEngineeringExecution,
+  planQaExecution,
   planReviewExecution,
   type BudgetMode,
 } from "./budget.ts";
 import { answerQuestion } from "./chat.ts";
+import { formatUpdateGuidance, QUICKSTART } from "./commands.ts";
 import {
   DEFAULT_CONFIG,
   initializeProjectConfig,
   loadCadenceConfig,
   resolveChatCandidates,
+  qaStages,
   reviewStages,
   type CadenceConfig,
   type PipelineStageConfig,
@@ -34,14 +35,23 @@ import {
   type ConversationContextSnapshot,
 } from "./conversation-context.ts";
 import { runEngineeringPipeline } from "./engineering.ts";
+import { diagnoseRuntimes, formatActionableDiagnostics } from "./doctor.ts";
 import { formatGitChanges, formatGitSafetyBlock, inspectGitWorktree } from "./git-safety.ts";
 import { type InteractionMode } from "./intent.ts";
+import { qualityAssureTicket } from "./qa.ts";
 import { reviewPullRequest } from "./review.ts";
+import { formatFailureRecovery } from "./recovery.ts";
 import { SessionStore, eventNow, type SessionEvent, type StageStatus } from "./session.ts";
 import { createTaskEnvelope, type RiskLevel, type TaskEnvelope, type TaskIntent } from "./task.ts";
 import { readUsageSummary } from "./usage.ts";
 
 type ChatMessage = { role: "you" | "cadence"; text: string };
+type RetryRequest =
+  | { kind: "chat"; question: string; history: ChatMessage[] }
+  | { kind: "explore"; envelope: TaskEnvelope }
+  | { kind: "engineering"; envelope: TaskEnvelope; mode: BudgetMode; context: ConversationContextSnapshot | null }
+  | { kind: "review"; envelope: TaskEnvelope }
+  | { kind: "qa"; envelope: TaskEnvelope };
 type StageView = {
   name: string;
   status: StageStatus;
@@ -86,7 +96,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   const [configPaths, setConfigPaths] = useState<string[]>([]);
   const [activeRisk, setActiveRisk] = useState<RiskLevel | null>(null);
   const [activeContext, setActiveContext] = useState("none");
-  const [activePipelineKind, setActivePipelineKind] = useState<"engineering" | "review">("engineering");
+  const [activePipelineKind, setActivePipelineKind] = useState<"engineering" | "review" | "qa">("engineering");
   const [activePath, setActivePath] = useState("Chat → auto-select");
   const [draftResponse, setDraftResponse] = useState("");
   const [budgetMode, setBudgetMode] = useState<BudgetMode>(DEFAULT_CONFIG.budget.defaultMode);
@@ -96,6 +106,8 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     context: ConversationContextSnapshot | null;
   } | null>(null);
   const [pendingReview, setPendingReview] = useState<TaskEnvelope | null>(null);
+  const [pendingQa, setPendingQa] = useState<TaskEnvelope | null>(null);
+  const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -154,17 +166,16 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   const runDoctor = async () => {
     setBusy(true);
     setNotice("Checking installed agent CLIs…");
-    const diagnostics = await Promise.all([
-      new CodexCliAdapter().diagnose(),
-      new ClaudeCliAdapter().diagnose(),
-      new OpenCodeCliAdapter().diagnose(),
-    ]);
-    for (const diagnostic of diagnostics) {
-      await storeRef.current?.append(eventNow({ type: "diagnostic", cli: diagnostic.command, ...diagnostic }));
+    try {
+      const diagnostics = await diagnoseRuntimes();
+      for (const diagnostic of diagnostics) {
+        await storeRef.current?.append(eventNow({ type: "diagnostic", cli: diagnostic.command, ...diagnostic }));
+      }
+      await addMessage({ role: "cadence", text: formatActionableDiagnostics(diagnostics) });
+      setNotice("Doctor complete");
+    } finally {
+      setBusy(false);
     }
-    await addMessage({ role: "cadence", text: formatDiagnostics(diagnostics) });
-    setNotice("Doctor complete");
-    setBusy(false);
   };
 
   const prepareEngineering = async (
@@ -175,6 +186,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     const gitState = await inspectGitWorktree(cwd).catch(() => null);
     if (!gitState) {
       setPendingEngineering(null);
+      setRetryRequest({ kind: "engineering", envelope, mode: selectedBudget, context });
       setLastRoute("engineering");
       setActiveRisk(envelope.risk);
       setActivePath("Engineering → blocked by Git safety");
@@ -187,6 +199,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     }
     if (!gitState.clean) {
       setPendingEngineering(null);
+      setRetryRequest({ kind: "engineering", envelope, mode: selectedBudget, context });
       setLastRoute("engineering");
       setActiveRisk(envelope.risk);
       setActivePath("Engineering → blocked by Git safety");
@@ -195,6 +208,17 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       return;
     }
     const plan = planEngineeringExecution(envelope, config, selectedBudget);
+    const limitError = modelCallLimitViolation(plan.totalModelCalls, config.guardrails.maxModelCallsPerTask);
+    if (limitError) {
+      setPendingEngineering(null);
+      setRetryRequest({ kind: "engineering", envelope, mode: selectedBudget, context });
+      setLastRoute("engineering");
+      setActiveRisk(envelope.risk);
+      setActivePath("Engineering → blocked by call limit");
+      setNotice("Engineering blocked · per-task call limit");
+      await addMessage({ role: "cadence", text: limitError });
+      return;
+    }
     setPendingEngineering({ envelope, mode: selectedBudget, context });
     setLastRoute("engineering");
     setActivePipelineKind("engineering");
@@ -204,7 +228,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     setNotice("Preflight ready · press Enter to continue · /cancel to stop");
     await addMessage({
       role: "cadence",
-      text: `${formatExecutionPreflight(plan)}\n\n${formatConversationContextPreflight(context, envelope.request)}`,
+      text: `${formatExecutionPreflight(plan, config.guardrails.maxModelCallsPerTask)}\n\n${formatConversationContextPreflight(context, envelope.request)}`,
     });
   };
 
@@ -215,6 +239,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   ) => {
     const gitState = await inspectGitWorktree(cwd).catch(() => null);
     if (!gitState) {
+      setRetryRequest({ kind: "engineering", envelope, mode: selectedBudget, context });
       setNotice("Engineering blocked · Git status unavailable");
       setActivePath("Engineering → blocked by Git safety");
       await addMessage({
@@ -224,12 +249,21 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       return;
     }
     if (!gitState.clean) {
+      setRetryRequest({ kind: "engineering", envelope, mode: selectedBudget, context });
       setNotice("Engineering blocked · working tree changed after preflight");
       setActivePath("Engineering → blocked by Git safety");
       await addMessage({ role: "cadence", text: formatGitSafetyBlock(gitState) });
       return;
     }
     const plan = planEngineeringExecution(envelope, config, selectedBudget);
+    const limitError = modelCallLimitViolation(plan.totalModelCalls, config.guardrails.maxModelCallsPerTask);
+    if (limitError) {
+      setRetryRequest({ kind: "engineering", envelope, mode: selectedBudget, context });
+      setNotice("Engineering blocked · per-task call limit changed after preflight");
+      setActivePath("Engineering → blocked by call limit");
+      await addMessage({ role: "cadence", text: limitError });
+      return;
+    }
     setLastRoute("engineering");
     setActivePipelineKind("engineering");
     setActiveRisk(envelope.risk);
@@ -314,6 +348,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         ? formatGitChanges(finalGitState)
         : "Changed files could not be determined because Git status was unavailable after execution.";
       await addMessage({ role: "cadence", text: `${execution.summary}\n\n${changeReport}` });
+      setRetryRequest(null);
       setNotice("Engineering cadence complete · awaiting human review");
       setActivePath(`Engineering → ${selectedBudget} → ${envelope.risk}-risk cadence → human review`);
     } catch (error) {
@@ -321,9 +356,10 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       const finalGitState = await inspectGitWorktree(cwd).catch(() => null);
       await changeStage(failureStage, "failed", message);
       await storeRef.current?.append(eventNow({ type: "error", message }));
+      setRetryRequest({ kind: "engineering", envelope, mode: selectedBudget, context });
       await addMessage({
         role: "cadence",
-        text: `I could not complete the engineering cadence. ${message}${finalGitState ? `\n\n${formatGitChanges(finalGitState)}` : ""}`,
+        text: `I could not complete the engineering cadence. ${message}${finalGitState ? `\n\n${formatGitChanges(finalGitState)}` : ""}\n${formatFailureRecovery(message, getProviderCooldowns())}`,
       });
       setNotice("Engineering preparation failed · use /doctor to inspect runtimes and connections");
     } finally {
@@ -352,11 +388,13 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       setActivePath(`Chat → ${result.cli}/${result.model}${result.fallbackUsed ? " → fallback" : ""}`);
       setDraftResponse("");
       await addMessage({ role: "cadence", text: result.text });
+      setRetryRequest(null);
       setNotice(`Chat · ${result.cli}/${result.model}${result.fallbackUsed ? " · fallback" : ""}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await storeRef.current?.append(eventNow({ type: "error", message }));
-      await addMessage({ role: "cadence", text: `I could not answer through the local model CLIs. ${message}` });
+      setRetryRequest({ kind: "chat", question, history });
+      await addMessage({ role: "cadence", text: `I could not answer through the local model CLIs. ${message}\n${formatFailureRecovery(message, getProviderCooldowns())}` });
       setNotice("Chat failed · use /doctor to inspect CLI authentication");
     } finally {
       setDraftResponse("");
@@ -380,11 +418,13 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       setActiveContext(context.sources.map((source) => source.reference).join(", "));
       setActivePath(`Connected → ${context.runner}/${context.model} → ${connectedTarget(envelope)}`);
       await addMessage({ role: "cadence", text: context.content });
+      setRetryRequest(null);
       setNotice(`Connected · ${context.runner}/${context.model} · ${context.sources.length} source${context.sources.length === 1 ? "" : "s"}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await storeRef.current?.append(eventNow({ type: "error", message }));
-      await addMessage({ role: "cadence", text: `I could not resolve the connected context. ${message}` });
+      setRetryRequest({ kind: "explore", envelope });
+      await addMessage({ role: "cadence", text: `I could not resolve the connected context. ${message}\n${formatFailureRecovery(message, getProviderCooldowns())}` });
       setNotice("Connected exploration failed · verify the MCP connection with the underlying CLI");
     } finally {
       setBusy(false);
@@ -392,6 +432,16 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   };
 
   const runReview = async (envelope: TaskEnvelope) => {
+    const plan = planReviewExecution(config);
+    const limitError = modelCallLimitViolation(plan.modelCalls, config.guardrails.maxModelCallsPerTask);
+    if (limitError) {
+      setPendingReview(null);
+      setRetryRequest({ kind: "review", envelope });
+      setNotice("Review blocked · per-task call limit changed after preflight");
+      setActivePath("Review → blocked by call limit");
+      await addMessage({ role: "cadence", text: limitError });
+      return;
+    }
     setPendingReview(null);
     setBusy(true);
     setLastRoute("review");
@@ -408,11 +458,13 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       await addMessage({ role: "cadence", text: result.report });
       const latest = result.runs.at(-1);
       if (latest) setActiveModel(`${latest.cli} · ${latest.model}`);
+      setRetryRequest(null);
       setNotice(`Review ready · ${result.runs.length} model stages · awaiting human review`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await storeRef.current?.append(eventNow({ type: "error", message }));
-      await addMessage({ role: "cadence", text: `I could not complete the pull-request review. ${message}` });
+      setRetryRequest({ kind: "review", envelope });
+      await addMessage({ role: "cadence", text: `I could not complete the pull-request review. ${message}\n${formatFailureRecovery(message, getProviderCooldowns())}` });
       setNotice("Review failed · use /doctor to inspect runtimes and connections");
     } finally {
       setBusy(false);
@@ -422,6 +474,17 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   const prepareReview = async (envelope: TaskEnvelope) => {
     const plan = planReviewExecution(config);
     const target = envelope.pullRequests.join(", ") || "working-tree diff";
+    const limitError = modelCallLimitViolation(plan.modelCalls, config.guardrails.maxModelCallsPerTask);
+    if (limitError) {
+      setPendingReview(null);
+      setRetryRequest({ kind: "review", envelope });
+      setLastRoute("review");
+      setActivePipelineKind("review");
+      setActivePath("Review → blocked by call limit");
+      setNotice("Review blocked · per-task call limit");
+      await addMessage({ role: "cadence", text: `${limitError}\n\nPR reviews stay thorough; raising the limit is the only way to run this configured review.` });
+      return;
+    }
     setPendingReview(envelope);
     setLastRoute("review");
     setActivePipelineKind("review");
@@ -430,7 +493,80 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     setStages(stageViews(plan.stages));
     setActivePath(`Review preflight → thorough → ${plan.modelCalls} calls`);
     setNotice("Review preflight ready · press Enter to continue · /cancel to stop");
-    await addMessage({ role: "cadence", text: formatReviewPreflight(plan, target) });
+    await addMessage({ role: "cadence", text: formatReviewPreflight(plan, target, config.guardrails.maxModelCallsPerTask) });
+  };
+
+  const runQa = async (envelope: TaskEnvelope) => {
+    const plan = planQaExecution(config);
+    const limitError = modelCallLimitViolation(plan.modelCalls, config.guardrails.maxModelCallsPerTask);
+    if (limitError) {
+      setPendingQa(null);
+      setRetryRequest({ kind: "qa", envelope });
+      setNotice("QA blocked · per-task call limit changed after preflight");
+      setActivePath("QA → blocked by call limit");
+      await addMessage({ role: "cadence", text: limitError });
+      return;
+    }
+    setPendingQa(null);
+    setBusy(true);
+    setLastRoute("qa");
+    setActivePipelineKind("qa");
+    setActiveRisk(null);
+    setActiveContext(envelope.linearTickets.join(", "));
+    setStages(stageViews(qaStages(config)));
+    setActivePath(`QA → ${envelope.linearTickets.join(", ")} → collecting evidence`);
+    setNotice("Ticket QA · collecting requirements, linked PRs, and CI evidence…");
+    try {
+      const result = await qualityAssureTicket(envelope, cwd, config, (update) => {
+        void changeStage(update.stage.name, update.status, update.detail, update.model);
+      });
+      setActiveContext(result.context.sources.map((source) => source.reference).join(", "));
+      const latest = result.runs.at(-1);
+      if (latest) setActiveModel(`${latest.cli} · ${latest.model}`);
+      await addMessage({
+        role: "cadence",
+        text: `${result.report}\n\nRead-only QA complete. No files, tickets, pull requests, or comments were changed. Say “implement the confirmed fixes” to promote this evidence into an engineering preflight.`,
+      });
+      setRetryRequest(null);
+      setActivePath(`QA → ${envelope.linearTickets.join(", ")} → human decision`);
+      setNotice(`QA report ready · ${result.runs.length} model stages · awaiting human decision`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await storeRef.current?.append(eventNow({ type: "error", message }));
+      setRetryRequest({ kind: "qa", envelope });
+      await addMessage({ role: "cadence", text: `I could not complete ticket QA. ${message}\n${formatFailureRecovery(message, getProviderCooldowns())}` });
+      setNotice("Ticket QA failed · use /doctor to inspect runtimes and connections");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const prepareQa = async (envelope: TaskEnvelope) => {
+    if (!envelope.linearTickets.length) {
+      await addMessage({ role: "cadence", text: "Ticket QA needs a Linear ticket ID. Usage: /qa ELM-2851" });
+      return;
+    }
+    const plan = planQaExecution(config);
+    const limitError = modelCallLimitViolation(plan.modelCalls, config.guardrails.maxModelCallsPerTask);
+    if (limitError) {
+      setPendingQa(null);
+      setRetryRequest({ kind: "qa", envelope });
+      setLastRoute("qa");
+      setActivePipelineKind("qa");
+      setActivePath("QA → blocked by call limit");
+      setNotice("QA blocked · per-task call limit");
+      await addMessage({ role: "cadence", text: `${limitError}\n\nTicket QA keeps independent scrutiny; raise the limit to run this configured cadence.` });
+      return;
+    }
+    setPendingQa(envelope);
+    setLastRoute("qa");
+    setActivePipelineKind("qa");
+    setActiveRisk(null);
+    setActiveContext(envelope.linearTickets.join(", "));
+    setStages(stageViews(plan.stages));
+    setActivePath(`QA preflight → ${envelope.linearTickets.join(", ")} → ${plan.modelCalls} calls`);
+    setNotice("QA preflight ready · press Enter to continue · /cancel to stop");
+    await addMessage({ role: "cadence", text: formatQaPreflight(plan, envelope.linearTickets, config.guardrails.maxModelCallsPerTask) });
   };
 
   const submit = async (value: string) => {
@@ -448,6 +584,12 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       await runReview(pending);
       return;
     }
+    if (!text && pendingQa && !busy) {
+      const pending = pendingQa;
+      setPendingQa(null);
+      await runQa(pending);
+      return;
+    }
     if (!text) return;
     if (text === "/exit" || text === "/quit") {
       exit();
@@ -461,9 +603,15 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         "/explore <request>   use repository and MCP tools read-only",
         "/pipeline <task>     force the engineering cadence",
         "/review <PR>         run the pull-request review pipeline",
+        "/qa <ticket>         assess requirements, linked PRs, and CI evidence",
         "/pipelines           show risk-adaptive stage layouts",
         "/budget <mode>       economy, balanced, or thorough",
+        "/limit <n|off>       set the session model-call ceiling",
         "/usage               show local 7-day model activity",
+        "/retry               retry the last preserved failure",
+        "/quickstart          show the five-minute walkthrough",
+        "/setup               show guided-setup instructions",
+        "/update              show safe update instructions",
         "/context view        inspect pending conversation context",
         "/context none        remove pending conversation context",
         "/cancel              cancel a pending preflight",
@@ -478,6 +626,37 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     if (text === "/doctor") {
       await addMessage({ role: "you", text });
       await runDoctor();
+      return;
+    }
+    if (text === "/quickstart") {
+      await addMessage({ role: "cadence", text: QUICKSTART });
+      return;
+    }
+    if (text === "/setup") {
+      await addMessage({ role: "cadence", text: "Guided setup runs outside the TUI so it can safely prompt you. Exit with /exit, run `cadenceai setup`, then reopen CadenceAI in your project." });
+      return;
+    }
+    if (text === "/update") {
+      await addMessage({ role: "cadence", text: `${formatUpdateGuidance(null)}\n\nFor checkout-aware instructions, exit and run \`cadenceai update\`.` });
+      return;
+    }
+    if (text === "/retry") {
+      if (busy) {
+        await addMessage({ role: "cadence", text: "CadenceAI is still working. Retry is available after the current request finishes." });
+        return;
+      }
+      if (!retryRequest) {
+        await addMessage({ role: "cadence", text: "There is no failed request preserved for retry." });
+        return;
+      }
+      const retry = retryRequest;
+      setRetryRequest(null);
+      await addMessage({ role: "cadence", text: `Retrying the preserved ${retry.kind} request. Configured provider fallbacks and current guardrails apply.` });
+      if (retry.kind === "chat") await runChat(retry.question, retry.history);
+      else if (retry.kind === "explore") await runExplore(retry.envelope);
+      else if (retry.kind === "engineering") await prepareEngineering(retry.envelope, retry.mode, retry.context);
+      else if (retry.kind === "review") await prepareReview(retry.envelope);
+      else await prepareQa(retry.envelope);
       return;
     }
     if (text === "/usage") {
@@ -509,6 +688,35 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
           text: "The pending pull-request review is unchanged: reviews always use the configured thorough cadence.",
         });
       }
+      if (pendingQa) {
+        await addMessage({
+          role: "cadence",
+          text: "The pending ticket QA is unchanged: QA always uses the configured evidence-driven cadence.",
+        });
+      }
+      return;
+    }
+    if (text === "/limit" || text.startsWith("/limit ")) {
+      const requested = text.split(/\s+/)[1];
+      if (!requested) {
+        await addMessage({ role: "cadence", text: `Current per-task model-call limit: ${config.guardrails.maxModelCallsPerTask ?? "off"}. Use /limit 6 or /limit off.` });
+        return;
+      }
+      const parsed = requested === "off" ? null : Number(requested);
+      if (parsed !== null && (!Number.isInteger(parsed) || parsed < 1 || parsed > 50)) {
+        await addMessage({ role: "cadence", text: "The model-call limit must be an integer from 1 to 50, or off." });
+        return;
+      }
+      const replacedPreflight = Boolean(pendingEngineering || pendingReview || pendingQa);
+      setConfig((current) => ({ ...current, guardrails: { maxModelCallsPerTask: parsed } }));
+      setPendingEngineering(null);
+      setPendingReview(null);
+      setPendingQa(null);
+      setNotice(`Per-task model-call limit: ${parsed ?? "off"}`);
+      await addMessage({
+        role: "cadence",
+        text: `Per-task model-call limit set to ${parsed ?? "off"} for this session.${replacedPreflight ? " The pending preflight was cancelled; submit the request again to see an updated estimate." : ""}\nPersist this setting with \`cadenceai setup\` or guardrails.maxModelCallsPerTask in your configuration.`,
+      });
       return;
     }
     if (text === "/context" || text.startsWith("/context ")) {
@@ -534,9 +742,11 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       await addMessage({ role: "cadence", text: "Usage: /context view or /context none" });
       return;
     }
-    if (text === "/cancel" && (pendingEngineering || pendingReview)) {
+    if (text === "/cancel" && (pendingEngineering || pendingReview || pendingQa)) {
       setPendingEngineering(null);
       setPendingReview(null);
+      setPendingQa(null);
+      setRetryRequest(null);
       setStages(initialStages.map((stage) => ({ ...stage, logs: [], expanded: false })));
       setLastRoute("chat");
       setActiveRisk(null);
@@ -561,6 +771,8 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       setDraftResponse("");
       setPendingEngineering(null);
       setPendingReview(null);
+      setPendingQa(null);
+      setRetryRequest(null);
       await addMessage({ role: "cadence", text: "Ready for a new question or task." });
       setNotice(`Mode: ${mode}`);
       return;
@@ -598,6 +810,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
           setConfig(loaded.config);
           setConfigPaths(loaded.loadedPaths);
           setBudgetMode(loaded.config.budget.defaultMode);
+          setModelSelection(loaded.config.chat.defaultModel);
           setNotice(`Created ${path}`);
           await addMessage({ role: "cadence", text: `Created ${path}. Edit model profiles, risk stages, or review stages there, then run /config reload.` });
         } catch (error) {
@@ -612,6 +825,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
           setConfig(loaded.config);
           setConfigPaths(loaded.loadedPaths);
           setBudgetMode(loaded.config.budget.defaultMode);
+          setModelSelection(loaded.config.chat.defaultModel);
           setNotice("Configuration reloaded");
           await addMessage({ role: "cadence", text: `Configuration reloaded from ${loaded.loadedPaths.join(", ") || "built-in defaults"}.` });
         } catch (error) {
@@ -639,7 +853,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
           return `${risk}: ${planEngineeringExecution(envelope, config, budgetMode).stages.map((stage) => stage.name).join(" → ")}`;
         })
         .join("\n");
-      await addMessage({ role: "cadence", text: `Engineering pipeline · ${budgetMode}\n${risks}\n\nPull-request review\n${reviewStages(config).map((stage) => stage.name).join(" → ")}` });
+      await addMessage({ role: "cadence", text: `Engineering pipeline · ${budgetMode}\n${risks}\n\nPull-request review\n${reviewStages(config).map((stage) => stage.name).join(" → ")}\n\nTicket QA\n${qaStages(config).map((stage) => stage.name).join(" → ")}` });
       return;
     }
     if (text.startsWith("/mode")) {
@@ -661,6 +875,8 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
           ? "explore"
           : text === "/review" || text.startsWith("/review ")
             ? "review"
+            : text === "/qa" || text.startsWith("/qa ")
+              ? "qa"
             : null;
     if (forced && !text.includes(" ")) {
       if (forced === "chat" || forced === "engineering") {
@@ -669,14 +885,15 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         setNotice(`Mode set to ${nextMode}`);
         await addMessage({ role: "cadence", text: `Mode is now ${nextMode}. ${modeDescription(nextMode)}` });
       } else {
-        await addMessage({ role: "cadence", text: `Usage: /${forced === "review" ? "review <PR or diff request>" : "explore <connected question>"}` });
+        await addMessage({ role: "cadence", text: `Usage: /${forced === "review" ? "review <PR or diff request>" : forced === "qa" ? "qa <Linear ticket>" : "explore <connected question>"}` });
       }
       return;
     }
     const request = forced ? text.slice(text.indexOf(" ") + 1).trim() : text;
-    const replacedPreflight = pendingEngineering ?? pendingReview;
+    const replacedPreflight = pendingEngineering ?? pendingReview ?? pendingQa;
     if (pendingEngineering) setPendingEngineering(null);
     if (pendingReview) setPendingReview(null);
+    if (pendingQa) setPendingQa(null);
     const userMessage: ChatMessage = { role: "you", text: request };
     const history = [...messages, userMessage];
     await addMessage(userMessage);
@@ -687,6 +904,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       await addMessage({ role: "cadence", text: "I’m still working on the previous request. Wait for it to finish, then send this again." });
       return;
     }
+    setRetryRequest(null);
     const modeIntent = mode === "chat" ? "chat" : mode === "pipeline" ? "engineering" : undefined;
     const conversationContext = createConversationContextSnapshot(request, messages);
     const envelope = createTaskEnvelope(request, config, forced ?? modeIntent, conversationContext?.text);
@@ -699,6 +917,8 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       await runExplore(envelope);
     } else if (envelope.intent === "review") {
       await prepareReview(envelope);
+    } else if (envelope.intent === "qa") {
+      await prepareQa(envelope);
     } else {
       await runChat(request, history);
     }
@@ -707,7 +927,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   const visibleMessages = useMemo(() => messages.slice(-(compact ? 5 : 8)), [compact, messages]);
   const showWelcome = messages.length === 1 && stages.every((stage) => stage.status === "waiting");
   const pipelineActive = stages.some((stage) => stage.status !== "waiting");
-  const showPipeline = (pipelineActive || Boolean(pendingEngineering) || Boolean(pendingReview)) && (lastRoute === "engineering" || lastRoute === "review");
+  const showPipeline = (pipelineActive || Boolean(pendingEngineering) || Boolean(pendingReview) || Boolean(pendingQa)) && (lastRoute === "engineering" || lastRoute === "review" || lastRoute === "qa");
 
   if (showWelcome) {
     return (
@@ -741,7 +961,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
               />
             </Box>
             <Box marginTop={1} justifyContent="space-between">
-              <Text><Text color="cyan">mode {mode}</Text><Text dimColor> · budget {budgetMode}</Text></Text>
+              <Text><Text color="cyan">mode {mode}</Text><Text dimColor> · budget {budgetMode} · limit {config.guardrails.maxModelCallsPerTask ?? "off"}</Text></Text>
               <Text dimColor>Claude + Codex + OpenCode</Text>
             </Box>
           </Box>
@@ -797,7 +1017,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         >
           {showPipeline ? (
             <>
-          <Text bold>{lastRoute === "review" ? "REVIEW" : "CADENCE"} <Text dimColor>({stages.filter((stage) => stage.status === "complete").length}/{stages.length}){activeRisk ? ` · ${activeRisk}` : ""}</Text></Text>
+          <Text bold>{lastRoute === "review" ? "REVIEW" : lastRoute === "qa" ? "TICKET QA" : "CADENCE"} <Text dimColor>({stages.filter((stage) => stage.status === "complete").length}/{stages.length}){activeRisk ? ` · ${activeRisk}` : ""}</Text></Text>
           {stages.map((stage, index) => (
             <Box key={`${stage.name}-${index}`} flexDirection="column">
               <Text inverse={stageFocus && selectedStage === index}>
@@ -849,12 +1069,14 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
               ? "Press Enter to run, /budget <mode>, or /cancel"
               : pendingReview
                 ? "Press Enter to run the thorough review, or /cancel"
+                : pendingQa
+                  ? "Press Enter to run read-only ticket QA, or /cancel"
                 : "Ask anything, or describe an implementation task"}
         />
       </Box>
       <Box paddingX={1} justifyContent="space-between">
         <Text dimColor>{notice}</Text>
-        <Text dimColor>Mode {mode} · Budget {budgetMode} · Model {modelSelection} · /usage · /doctor</Text>
+        <Text dimColor>Mode {mode} · Budget {budgetMode} · Limit {config.guardrails.maxModelCallsPerTask ?? "off"} · Model {modelSelection}{retryRequest ? " · retry ready" : ""} · /usage · /doctor</Text>
       </Box>
     </Box>
   );
@@ -876,14 +1098,6 @@ function restoreEvents(
     const latest = changes.filter((event) => event.stage === stage.name).at(-1);
     return latest ? { ...stage, status: latest.status, detail: latest.detail ?? stage.detail, model: latest.model ?? stage.model } : stage;
   }));
-}
-
-function formatDiagnostics(diagnostics: CliDiagnostic[]): string {
-  return diagnostics.map((item) => {
-    const icon = item.installed && item.authenticated ? "✓" : "✗";
-    const state = !item.installed ? "not installed" : item.authenticated ? "authenticated" : "login required";
-    return `${icon} ${item.command} ${item.version ?? ""} — ${state}${item.detail ? `\n  ${item.detail}` : ""}`;
-  }).join("\n");
 }
 
 function statusIcon(status: StageStatus) {

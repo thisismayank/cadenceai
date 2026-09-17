@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatExecutionPreflight, formatReviewPreflight, planEngineeringExecution, planReviewExecution } from "./budget.ts";
+import { formatExecutionPreflight, formatQaPreflight, formatReviewPreflight, modelCallLimitViolation, planEngineeringExecution, planQaExecution, planReviewExecution } from "./budget.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { createTaskEnvelope } from "./task.ts";
 
@@ -10,7 +10,8 @@ test("economy uses one model call for an ordinary implementation", () => {
   assert.equal(plan.risk, "low");
   assert.equal(plan.totalModelCalls, 1);
   assert.deepEqual(plan.stageIds, ["implement", "verify", "human_review"]);
-  assert.match(formatExecutionPreflight(plan), /Expected model calls: 1/);
+  assert.match(formatExecutionPreflight(plan, 6), /Expected model calls: 1/);
+  assert.match(formatExecutionPreflight(plan, 6), /Per-task limit: 6/);
   assert.match(formatExecutionPreflight(plan), /clean working tree confirmed/i);
   assert.match(formatExecutionPreflight(plan), /Press Enter to continue/);
 });
@@ -36,4 +37,17 @@ test("pull-request review preflight reports the configured thorough call count",
   assert.equal(plan.modelCalls, 6);
   assert.match(formatReviewPreflight(plan, "PR #42"), /Expected model calls: 6/);
   assert.match(formatReviewPreflight(plan, "PR #42"), /always uses.*thorough/i);
+  assert.match(formatReviewPreflight(plan, "PR #42", 6), /high-call operation/i);
+  assert.equal(modelCallLimitViolation(6, 6), null);
+  assert.match(modelCallLimitViolation(7, 6) ?? "", /above your configured limit/i);
+});
+
+test("ticket QA fits the Starter call ceiling and explains its evidence boundary", () => {
+  const plan = planQaExecution(DEFAULT_CONFIG);
+  assert.equal(plan.modelCalls, 6);
+  assert.equal(modelCallLimitViolation(plan.modelCalls, 6), null);
+  const preflight = formatQaPreflight(plan, ["ELM-2851"], 6);
+  assert.match(preflight, /Expected model calls: 6/);
+  assert.match(preflight, /linked pull-request diffs/i);
+  assert.match(preflight, /missing local execution evidence.*unverified/i);
 });

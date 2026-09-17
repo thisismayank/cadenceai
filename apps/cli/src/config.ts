@@ -32,6 +32,9 @@ export type CadenceConfig = {
   budget: {
     defaultMode: BudgetMode;
   };
+  guardrails: {
+    maxModelCallsPerTask: number | null;
+  };
   chat: {
     defaultModel: string;
     models: Record<string, ModelCandidate>;
@@ -44,6 +47,7 @@ export type CadenceConfig = {
   pipelines: {
     engineering: EngineeringPipelineConfig;
     pullRequestReview: ReviewPipelineConfig;
+    qualityAssurance: ReviewPipelineConfig;
   };
 };
 
@@ -53,6 +57,9 @@ export const DEFAULT_CONFIG: CadenceConfig = {
   version: 1,
   budget: {
     defaultMode: "balanced",
+  },
+  guardrails: {
+    maxModelCallsPerTask: null,
   },
   chat: {
     defaultModel: "auto",
@@ -97,6 +104,18 @@ export const DEFAULT_CONFIG: CadenceConfig = {
         human_review: { name: "Human review", detail: "Decide how to act on the findings", modelProfile: "human" },
       },
       order: ["inspect", "requirements", "correctness", "test_gaps", "adversarial", "synthesize", "human_review"],
+    },
+    qualityAssurance: {
+      stages: {
+        collect: { name: "Collect evidence", detail: "Fetch the ticket, comments, linked pull requests, diffs, and CI results", modelProfile: "connected_research" },
+        requirements: { name: "Requirements", detail: "Build the requirement and acceptance-criteria matrix", modelProfile: "balanced_reasoner" },
+        implementation: { name: "Implementation", detail: "Map pull-request and code evidence to every requirement", modelProfile: "pull_request_review" },
+        verification: { name: "Verification gaps", detail: "Assess CI, tests, failures, and unverified behavior", modelProfile: "flagship_reasoner" },
+        adversarial: { name: "Adversarial", detail: "Challenge coverage, edge cases, regressions, and release assumptions", modelProfile: "flagship_reasoner" },
+        synthesize: { name: "QA report", detail: "Consolidate the evidence into a release-oriented verdict", modelProfile: "pull_request_review" },
+        human_review: { name: "Human decision", detail: "Accept the evidence, request fixes, or start engineering", modelProfile: "human" },
+      },
+      order: ["collect", "requirements", "implementation", "verification", "adversarial", "synthesize", "human_review"],
     },
   },
 };
@@ -156,6 +175,15 @@ export function reviewStages(config: CadenceConfig): PipelineStageConfig[] {
   });
 }
 
+export function qaStages(config: CadenceConfig): PipelineStageConfig[] {
+  const pipeline = config.pipelines.qualityAssurance;
+  return pipeline.order.map((id) => {
+    const stage = pipeline.stages[id];
+    if (!stage) throw new Error(`QA pipeline references unknown stage '${id}'`);
+    return stage;
+  });
+}
+
 async function readOptionalJson(path: string): Promise<unknown | undefined> {
   try {
     return JSON.parse(await readFile(path, "utf8")) as unknown;
@@ -184,6 +212,9 @@ function validateConfig(value: unknown): CadenceConfig {
   if (!config.budget || !["economy", "balanced", "thorough"].includes(config.budget.defaultMode)) {
     throw new Error("CadenceAI config budget.defaultMode must be economy, balanced, or thorough");
   }
+  if (!config.guardrails || (config.guardrails.maxModelCallsPerTask !== null && (!Number.isInteger(config.guardrails.maxModelCallsPerTask) || config.guardrails.maxModelCallsPerTask < 1 || config.guardrails.maxModelCallsPerTask > 50))) {
+    throw new Error("CadenceAI config guardrails.maxModelCallsPerTask must be null or an integer from 1 to 50");
+  }
   if (!config.chat?.models || !config.profiles?.conversation || !config.profiles?.connected_research) {
     throw new Error("CadenceAI config is missing chat models or required model profiles");
   }
@@ -200,12 +231,17 @@ function validateConfig(value: unknown): CadenceConfig {
   if (!Array.isArray(config.pipelines?.pullRequestReview?.order)) {
     throw new Error("CadenceAI config is missing the pull-request review order");
   }
+  if (!Array.isArray(config.pipelines?.qualityAssurance?.order)) {
+    throw new Error("CadenceAI config is missing the quality-assurance order");
+  }
   for (const [id, stage] of Object.entries(config.pipelines.engineering.stages)) validateStage(stage, `engineering.stages.${id}`);
   for (const [id, stage] of Object.entries(config.pipelines.pullRequestReview.stages)) validateStage(stage, `pullRequestReview.stages.${id}`);
+  for (const [id, stage] of Object.entries(config.pipelines.qualityAssurance.stages)) validateStage(stage, `qualityAssurance.stages.${id}`);
   pipelineStages(config, "low");
   pipelineStages(config, "medium");
   pipelineStages(config, "high");
   reviewStages(config);
+  qaStages(config);
   const verification = config.pipelines.engineering.verificationCommands;
   if (verification !== "auto" && (!Array.isArray(verification) || verification.some((command) => !isObject(command) || typeof command.command !== "string" || !Array.isArray(command.args) || typeof command.label !== "string"))) {
     throw new Error("engineering.verificationCommands must be 'auto' or an array of command definitions");
