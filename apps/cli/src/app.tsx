@@ -9,7 +9,13 @@ import {
   type CliDiagnostic,
 } from "@cadenceai/agents";
 import { analyzeTask } from "./analyzer.ts";
-import { formatExecutionPreflight, planEngineeringExecution, type BudgetMode } from "./budget.ts";
+import {
+  formatExecutionPreflight,
+  formatReviewPreflight,
+  planEngineeringExecution,
+  planReviewExecution,
+  type BudgetMode,
+} from "./budget.ts";
 import { answerQuestion } from "./chat.ts";
 import {
   DEFAULT_CONFIG,
@@ -28,6 +34,7 @@ import {
   type ConversationContextSnapshot,
 } from "./conversation-context.ts";
 import { runEngineeringPipeline } from "./engineering.ts";
+import { formatGitChanges, formatGitSafetyBlock, inspectGitWorktree } from "./git-safety.ts";
 import { type InteractionMode } from "./intent.ts";
 import { reviewPullRequest } from "./review.ts";
 import { SessionStore, eventNow, type SessionEvent, type StageStatus } from "./session.ts";
@@ -88,6 +95,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     mode: BudgetMode;
     context: ConversationContextSnapshot | null;
   } | null>(null);
+  const [pendingReview, setPendingReview] = useState<TaskEnvelope | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -164,6 +172,28 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     selectedBudget = budgetMode,
     context: ConversationContextSnapshot | null = null,
   ) => {
+    const gitState = await inspectGitWorktree(cwd).catch(() => null);
+    if (!gitState) {
+      setPendingEngineering(null);
+      setLastRoute("engineering");
+      setActiveRisk(envelope.risk);
+      setActivePath("Engineering → blocked by Git safety");
+      setNotice("Engineering blocked · Git status unavailable");
+      await addMessage({
+        role: "cadence",
+        text: "Engineering requires a verifiable clean Git working tree, but CadenceAI could not read its status. Check that Git is installed and the repository is accessible, then try again.",
+      });
+      return;
+    }
+    if (!gitState.clean) {
+      setPendingEngineering(null);
+      setLastRoute("engineering");
+      setActiveRisk(envelope.risk);
+      setActivePath("Engineering → blocked by Git safety");
+      setNotice("Engineering blocked · clean Git working tree required");
+      await addMessage({ role: "cadence", text: formatGitSafetyBlock(gitState) });
+      return;
+    }
     const plan = planEngineeringExecution(envelope, config, selectedBudget);
     setPendingEngineering({ envelope, mode: selectedBudget, context });
     setLastRoute("engineering");
@@ -183,6 +213,22 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     selectedBudget = budgetMode,
     context: ConversationContextSnapshot | null = null,
   ) => {
+    const gitState = await inspectGitWorktree(cwd).catch(() => null);
+    if (!gitState) {
+      setNotice("Engineering blocked · Git status unavailable");
+      setActivePath("Engineering → blocked by Git safety");
+      await addMessage({
+        role: "cadence",
+        text: "The Git safety check could not confirm a clean working tree, so CadenceAI stopped before invoking a model or modifying files.",
+      });
+      return;
+    }
+    if (!gitState.clean) {
+      setNotice("Engineering blocked · working tree changed after preflight");
+      setActivePath("Engineering → blocked by Git safety");
+      await addMessage({ role: "cadence", text: formatGitSafetyBlock(gitState) });
+      return;
+    }
     const plan = planEngineeringExecution(envelope, config, selectedBudget);
     setLastRoute("engineering");
     setActivePipelineKind("engineering");
@@ -209,7 +255,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
           role: "cadence",
           text: `Connected context via ${context.runner}/${context.model}:\n\n${context.content}\n\nI’m using this source-grounded context for the ${envelope.risk}-risk engineering cadence.`,
         });
-        analyzerTask = `${envelope.request}\n\n${contextForPipeline(context)}`;
+        analyzerTask = `${analyzerTask}\n\n${contextForPipeline(context)}`;
       } else {
         setActiveContext("repository");
       }
@@ -263,14 +309,22 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       if (finalModel) setActiveModel(finalModel);
       const humanStage = definitions.find((stage) => stage.modelProfile === "human");
       if (humanStage) await changeStage(humanStage.name, "waiting", execution.summary, "human");
-      await addMessage({ role: "cadence", text: execution.summary });
+      const finalGitState = await inspectGitWorktree(cwd).catch(() => null);
+      const changeReport = finalGitState
+        ? formatGitChanges(finalGitState)
+        : "Changed files could not be determined because Git status was unavailable after execution.";
+      await addMessage({ role: "cadence", text: `${execution.summary}\n\n${changeReport}` });
       setNotice("Engineering cadence complete · awaiting human review");
       setActivePath(`Engineering → ${selectedBudget} → ${envelope.risk}-risk cadence → human review`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const finalGitState = await inspectGitWorktree(cwd).catch(() => null);
       await changeStage(failureStage, "failed", message);
       await storeRef.current?.append(eventNow({ type: "error", message }));
-      await addMessage({ role: "cadence", text: `I could not prepare the engineering cadence. ${message}` });
+      await addMessage({
+        role: "cadence",
+        text: `I could not complete the engineering cadence. ${message}${finalGitState ? `\n\n${formatGitChanges(finalGitState)}` : ""}`,
+      });
       setNotice("Engineering preparation failed · use /doctor to inspect runtimes and connections");
     } finally {
       setBusy(false);
@@ -338,6 +392,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   };
 
   const runReview = async (envelope: TaskEnvelope) => {
+    setPendingReview(null);
     setBusy(true);
     setLastRoute("review");
     setActivePipelineKind("review");
@@ -364,6 +419,20 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     }
   };
 
+  const prepareReview = async (envelope: TaskEnvelope) => {
+    const plan = planReviewExecution(config);
+    const target = envelope.pullRequests.join(", ") || "working-tree diff";
+    setPendingReview(envelope);
+    setLastRoute("review");
+    setActivePipelineKind("review");
+    setActiveRisk(null);
+    setActiveContext(target);
+    setStages(stageViews(plan.stages));
+    setActivePath(`Review preflight → thorough → ${plan.modelCalls} calls`);
+    setNotice("Review preflight ready · press Enter to continue · /cancel to stop");
+    await addMessage({ role: "cadence", text: formatReviewPreflight(plan, target) });
+  };
+
   const submit = async (value: string) => {
     const text = value.trim();
     setInput("");
@@ -371,6 +440,12 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       const pending = pendingEngineering;
       setPendingEngineering(null);
       await runEngineering(pending.envelope, pending.mode, pending.context);
+      return;
+    }
+    if (!text && pendingReview && !busy) {
+      const pending = pendingReview;
+      setPendingReview(null);
+      await runReview(pending);
       return;
     }
     if (!text) return;
@@ -391,6 +466,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
         "/usage               show local 7-day model activity",
         "/context view        inspect pending conversation context",
         "/context none        remove pending conversation context",
+        "/cancel              cancel a pending preflight",
         "/config init         create .cadenceai.json",
         "/config reload       validate and reload configuration",
         "/doctor              inspect authenticated runners",
@@ -427,6 +503,12 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       setNotice(`Budget mode set to ${requested}`);
       await addMessage({ role: "cadence", text: budgetDescription(requested) });
       if (pendingEngineering) await prepareEngineering(pendingEngineering.envelope, requested, pendingEngineering.context);
+      if (pendingReview) {
+        await addMessage({
+          role: "cadence",
+          text: "The pending pull-request review is unchanged: reviews always use the configured thorough cadence.",
+        });
+      }
       return;
     }
     if (text === "/context" || text.startsWith("/context ")) {
@@ -452,13 +534,14 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       await addMessage({ role: "cadence", text: "Usage: /context view or /context none" });
       return;
     }
-    if (text === "/cancel" && pendingEngineering) {
+    if (text === "/cancel" && (pendingEngineering || pendingReview)) {
       setPendingEngineering(null);
+      setPendingReview(null);
       setStages(initialStages.map((stage) => ({ ...stage, logs: [], expanded: false })));
       setLastRoute("chat");
       setActiveRisk(null);
       setActivePath("Chat → auto-select");
-      setNotice("Pending engineering cadence cancelled");
+      setNotice("Pending cadence cancelled");
       await addMessage({ role: "cadence", text: "Cancelled. No model was invoked and no files were changed." });
       return;
     }
@@ -477,6 +560,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       setActivePath("Chat → auto-select");
       setDraftResponse("");
       setPendingEngineering(null);
+      setPendingReview(null);
       await addMessage({ role: "cadence", text: "Ready for a new question or task." });
       setNotice(`Mode: ${mode}`);
       return;
@@ -590,13 +674,14 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
       return;
     }
     const request = forced ? text.slice(text.indexOf(" ") + 1).trim() : text;
-    const replacedPreflight = pendingEngineering;
-    if (replacedPreflight) setPendingEngineering(null);
+    const replacedPreflight = pendingEngineering ?? pendingReview;
+    if (pendingEngineering) setPendingEngineering(null);
+    if (pendingReview) setPendingReview(null);
     const userMessage: ChatMessage = { role: "you", text: request };
     const history = [...messages, userMessage];
     await addMessage(userMessage);
     if (replacedPreflight) {
-      await addMessage({ role: "cadence", text: "The previous engineering preflight was cancelled because you started a new request. No model was invoked for it and no files were changed." });
+      await addMessage({ role: "cadence", text: "The previous preflight was cancelled because you started a new request. No model was invoked for it and no files were changed." });
     }
     if (busy) {
       await addMessage({ role: "cadence", text: "I’m still working on the previous request. Wait for it to finish, then send this again." });
@@ -613,7 +698,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
     } else if (envelope.intent === "explore") {
       await runExplore(envelope);
     } else if (envelope.intent === "review") {
-      await runReview(envelope);
+      await prepareReview(envelope);
     } else {
       await runChat(request, history);
     }
@@ -622,7 +707,7 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
   const visibleMessages = useMemo(() => messages.slice(-(compact ? 5 : 8)), [compact, messages]);
   const showWelcome = messages.length === 1 && stages.every((stage) => stage.status === "waiting");
   const pipelineActive = stages.some((stage) => stage.status !== "waiting");
-  const showPipeline = (pipelineActive || Boolean(pendingEngineering)) && (lastRoute === "engineering" || lastRoute === "review");
+  const showPipeline = (pipelineActive || Boolean(pendingEngineering) || Boolean(pendingReview)) && (lastRoute === "engineering" || lastRoute === "review");
 
   if (showWelcome) {
     return (
@@ -758,7 +843,13 @@ export function App({ cwd, continueLatest = false }: { cwd: string; continueLate
           onChange={setInput}
           onSubmit={(value) => void submit(value)}
           focus={!stageFocus}
-          placeholder={busy ? "Working…" : pendingEngineering ? "Press Enter to run, /budget <mode>, or /cancel" : "Ask anything, or describe an implementation task"}
+          placeholder={busy
+            ? "Working…"
+            : pendingEngineering
+              ? "Press Enter to run, /budget <mode>, or /cancel"
+              : pendingReview
+                ? "Press Enter to run the thorough review, or /cancel"
+                : "Ask anything, or describe an implementation task"}
         />
       </Box>
       <Box paddingX={1} justifyContent="space-between">

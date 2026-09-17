@@ -79,11 +79,13 @@ Inside the TUI:
 - Use `/mode auto`, `/mode chat`, or `/mode pipeline` to control routing for subsequent messages.
 - Use `/models` and `/model <alias>` to select the model used for ordinary conversation. Direct OpenCode references use `/model opencode/<provider>/<model>`.
 - Use `/budget economy`, `/budget balanced`, or `/budget thorough` to control engineering depth. Balanced is the default.
+- Engineering runs only inside a Git repository with a clean working tree. Commit or stash existing changes before submitting an implementation task.
 - Type `/usage` to view CadenceAI's local seven-day activity ledger and active provider cooldowns. It is not a provider quota balance.
 - Referential requests such as `implement that` locally freeze recent substantive conversation into the engineering preflight. Use `/context view` to inspect the full capsule or `/context none` to remove it.
 - Type `/doctor` to inspect installed versions and authentication for Claude, Codex, and OpenCode.
 - Press `Ctrl+L` to focus the cadence sidebar, use the arrow keys to select a stage, and press Enter to expand its details and streamed events.
 - Type `/stages` to focus the same navigator, `/new` to clear the active cadence, or `/exit` to close the session.
+- Type `/cancel` to stop an engineering or pull-request-review preflight before any model is invoked.
 
 After linking the package globally, launch it from any project with either `cadenceai` or `cadence`.
 
@@ -102,7 +104,11 @@ CadenceAI separates the requested outcome from its context:
 
 Engineering tasks are classified as low, medium, or high risk. Low-risk work uses a shorter cadence; security, authentication, billing, permissions, migrations, and other configured high-risk areas receive the full adversarial cadence.
 
-Engineering requests stop at a local preflight before invoking a model. The preflight shows the expected model-call count, deterministic stages, and selected cadence; press Enter to proceed, change `/budget`, or `/cancel`. Economy minimizes calls, Balanced adds independent reasoning according to risk, and Thorough uses every configured stage. High-risk Economy work still retains analyzer and adversarial scrutiny.
+Engineering requests stop at a local preflight before invoking a model. CadenceAI first requires a clean Git working tree, then shows the expected model-call count, deterministic stages, and selected cadence; press Enter to proceed, change `/budget`, or `/cancel`. The clean-tree check runs again immediately before execution so changes made while the preflight is open cannot be mixed into the agent's work. Economy minimizes calls, Balanced adds independent reasoning according to risk, and Thorough uses every configured stage. High-risk Economy work still retains analyzer and adversarial scrutiny.
+
+After an engineering run, CadenceAI reports the resulting Git status alongside the pipeline's verification summary. It does not automatically commit, revert, or delete files; review with normal Git tools and decide what to keep. This keeps recovery understandable without maintaining a second snapshot or rollback system.
+
+Pull-request review is read-only and always uses its configured thorough cadence. It has its own confirmation preflight showing the review target, stages, and expected model-call count. Engineering budget modes do not silently weaken review scrutiny.
 
 When an engineering request refers to prior discussion, CadenceAI captures up to eight recent substantive turns within a bounded local context capsule. Interface messages and previous preflights are excluded, `/new` forms a hard context boundary, and explicit ticket or risk signals in the capsule influence connected-context resolution and risk selection. The frozen capsule is shown before execution and prior assistant statements are labeled as untrusted proposals that agents must verify.
 

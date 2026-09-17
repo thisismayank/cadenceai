@@ -14,6 +14,12 @@ export type EngineeringExecutionPlan = {
   notes: string[];
 };
 
+export type ReviewExecutionPlan = {
+  stageIds: string[];
+  stages: PipelineStageConfig[];
+  modelCalls: number;
+};
+
 const STAGE_POLICY: Record<BudgetMode, Record<RiskLevel, string[] | "configured">> = {
   economy: {
     low: ["implement", "verify", "human_review"],
@@ -71,9 +77,34 @@ export function formatExecutionPreflight(plan: EngineeringExecutionPlan): string
     `  ${plan.modelCalls} × engineering stages`,
     `Deterministic stages: ${plan.stages.filter((stage) => stage.modelProfile === "shell").map((stage) => stage.name).join(", ") || "none"}`,
     `Cadence: ${plan.stages.map((stage) => stage.name).join(" → ")}`,
+    "Git safety: clean working tree confirmed; CadenceAI will check again before execution.",
     "",
     ...plan.notes.map((note) => `• ${note}`),
     "",
     "Press Enter to continue, choose /budget economy|balanced|thorough, or type /cancel.",
+  ].join("\n");
+}
+
+export function planReviewExecution(config: CadenceConfig): ReviewExecutionPlan {
+  const pipeline = config.pipelines.pullRequestReview;
+  const stageIds = pipeline.order.filter((id) => Boolean(pipeline.stages[id]));
+  const stages = stageIds.map((id) => pipeline.stages[id]!);
+  return {
+    stageIds,
+    stages,
+    modelCalls: stages.filter((stage) => stage.modelProfile !== "human" && stage.modelProfile !== "shell").length,
+  };
+}
+
+export function formatReviewPreflight(plan: ReviewExecutionPlan, target: string): string {
+  return [
+    "THOROUGH · PULL-REQUEST REVIEW",
+    "",
+    `Target: ${target}`,
+    `Expected model calls: ${plan.modelCalls}`,
+    `Cadence: ${plan.stages.map((stage) => stage.name).join(" → ")}`,
+    "",
+    "PR review is read-only and currently always uses the configured thorough cadence; the active engineering budget does not reduce it.",
+    "Press Enter to continue or type /cancel.",
   ].join("\n");
 }
