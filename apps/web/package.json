@@ -1,0 +1,35 @@
+{
+  "name": "@cadenceai/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start --port 3000",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cadenceai/agents": "workspace:*",
+    "@cadenceai/db": "workspace:*",
+    "@cadenceai/sandboxes": "workspace:*",
+    "@cadenceai/schemas": "workspace:*",
+    "@cadenceai/shared": "workspace:*",
+    "@cadenceai/workflows": "workspace:*",
+    "drizzle-orm": "^0.36.4",
+    "inngest": "^3.27.4",
+    "next": "^15.0.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "typescript": "^5.6.3"
+  }
+}

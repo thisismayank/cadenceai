@@ -1,0 +1,21 @@
+node_modules/
+.next/
+.turbo/
+dist/
+build/
+out/
+coverage/
+.cadence/
+
+*.log
+*.tsbuildinfo
+.DS_Store
+.vscode/
+.idea/
+
+.env
+.env.local
+.env.*.local
+
+# Drizzle
+drizzle/meta/_journal.json.bak
